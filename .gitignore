@@ -1,0 +1,11 @@
+# pytest and cache files
+__pycache__/
+.pytest_cache/
+*.ini
+runs/
+
+# configure
+.env 
+
+# output file
+output/
