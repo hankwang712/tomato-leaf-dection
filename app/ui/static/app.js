@@ -601,12 +601,67 @@
     refs.loadBtn.disabled = isBusy;
   }
 
-  function setKbStatus(target, text, isError = false) {
+  function setKbStatus(target, text, style = false) {
     if (!target) {
       return;
     }
+    const opts =
+      typeof style === "object" && style !== null && !Array.isArray(style)
+        ? style
+        : { isError: Boolean(style) };
+    const isError = Boolean(opts.isError);
     target.textContent = text;
-    target.classList.toggle("status-error", Boolean(isError));
+    target.classList.toggle("status-error", isError);
+    target.classList.toggle("status-success", Boolean(opts.isSuccess) && !isError);
+    target.classList.toggle("status-pending", Boolean(opts.isPending) && !isError);
+  }
+
+  const KB_FILE_DEFAULT_HINT = "支持 .txt、.md、.markdown";
+
+  function setKbUploadLabelUploading(isUploading) {
+    const label = document.getElementById("kb-upload-file-label");
+    if (label) {
+      label.classList.toggle("file-label--uploading", Boolean(isUploading));
+    }
+    const wrap = refs.kbUploadFile?.closest(".file-upload-wrapper");
+    if (wrap) {
+      wrap.classList.toggle("kb-file-upload--busy", Boolean(isUploading));
+    }
+    if (!isUploading) {
+      updateKbFileUploadFeedback();
+      return;
+    }
+    const icon = document.getElementById("kb-upload-file-icon");
+    const hint = document.getElementById("kb-upload-file-hint");
+    const file = refs.kbUploadFile?.files?.[0] || null;
+    if (file && icon && hint) {
+      icon.textContent = "⏳";
+      icon.classList.add("anim-hourglass");
+      const name = file.name || "文件";
+      hint.textContent = `正在上传「${name}」…`;
+    }
+  }
+
+  function updateKbFileUploadFeedback() {
+    const input = refs.kbUploadFile;
+    const label = document.getElementById("kb-upload-file-label");
+    const icon = document.getElementById("kb-upload-file-icon");
+    const hint = document.getElementById("kb-upload-file-hint");
+    if (!input || !label || !icon || !hint) {
+      return;
+    }
+    const file = input.files?.[0] || null;
+    label.classList.toggle("file-label--has-file", Boolean(file));
+    if (!file) {
+      icon.textContent = "📎";
+      icon.classList.remove("anim-hourglass");
+      hint.textContent = KB_FILE_DEFAULT_HINT;
+      return;
+    }
+    icon.classList.remove("anim-hourglass");
+    icon.textContent = "📄";
+    const name = file.name || "已选文件";
+    hint.textContent = `${name} · ${formatBytes(file.size)} · 点击可更换`;
   }
 
   function getFinalPayload() {
@@ -1198,6 +1253,9 @@
 
   function currentReportText() {
     const reports = getReportsPayload();
+    if (reports.baseline_disabled) {
+      return reports.multi_agent_markdown || "";
+    }
     if (state.reportMode === "baseline") {
       return reports.baseline_markdown || "";
     }
@@ -1427,11 +1485,14 @@
       return "救治决策流程图白板";
     }
     if (source === "report") {
-      if (state.reportMode === "baseline") {
-        return "单模型救治报告白板";
-      }
-      if (state.reportMode === "compare") {
-        return "救治报告对照白板";
+      const reports = getReportsPayload();
+      if (!reports.baseline_disabled) {
+        if (state.reportMode === "baseline") {
+          return "单模型救治报告白板";
+        }
+        if (state.reportMode === "compare") {
+          return "救治报告对照白板";
+        }
       }
       return "多智能体救治报告白板";
     }
@@ -1640,13 +1701,15 @@
     syncBoardViewContent({ fit: true });
   }
 
-  function renderReportModeSwitch(container) {
+  function renderReportModeSwitch(container, reports) {
     const switcher = el("div", "report-mode-switch");
-    const modes = [
-      { key: "multi", label: "会诊报告" },
-      { key: "baseline", label: "单模型报告" },
-      { key: "compare", label: "对照查看" },
-    ];
+    const modes = reports.baseline_disabled
+      ? [{ key: "multi", label: "会诊报告" }]
+      : [
+          { key: "multi", label: "会诊报告" },
+          { key: "baseline", label: "单模型报告" },
+          { key: "compare", label: "对照查看" },
+        ];
     for (const mode of modes) {
       const chip = createChip(mode.label, state.reportMode === mode.key);
       chip.addEventListener("click", () => {
@@ -1690,7 +1753,12 @@
 
     const baselineCard = el("article", "report-fact-card");
     baselineCard.append(el("div", "report-fact-label", "单模型对照"));
-    if (reports.baseline_error) {
+    if (reports.baseline_disabled) {
+      baselineCard.append(el("div", "report-fact-value muted", "未启用"));
+      baselineCard.append(
+        el("div", "report-fact-note", "当前配置不生成单模型对照报告，仅输出多智能体会诊报告。")
+      );
+    } else if (reports.baseline_error) {
       baselineCard.append(el("div", "report-fact-value muted", "不可用"));
       baselineCard.append(el("div", "report-fact-note", "基线 API 当前不可访问，但不会影响主报告。"));
     } else {
@@ -1796,7 +1864,11 @@
       return;
     }
 
-    renderReportModeSwitch(refs.reportBoard);
+    if (reports.baseline_disabled && (state.reportMode === "baseline" || state.reportMode === "compare")) {
+      state.reportMode = "multi";
+    }
+
+    renderReportModeSwitch(refs.reportBoard, reports);
 
     const toolbar = el("div", "report-toolbar");
     const boardBtn = createGhostButton("白板模式", () => openBoardView("report"));
@@ -2427,6 +2499,9 @@
       if (!reports.multi_agent_markdown) {
         return "报告节点正在把多轮会诊结论整理成结构化救治报告。";
       }
+      if (reports.baseline_disabled) {
+        return `救治报告已生成（未启用单模型对照）。多智能体版本 ${reports.multi_agent_markdown.length} 字符。`;
+      }
       return `救治报告已生成。多智能体版本 ${reports.multi_agent_markdown.length} 字符，单模型版本 ${(`${reports.baseline_markdown || ""}`).length} 字符。`;
     }
     return node.description || "";
@@ -2609,8 +2684,19 @@
       const kb = node.data?.kb_evidence || [];
       card.append(inspectorBlock("检索状态", paragraphNode(node.status === "active" ? "正在从知识库召回病例证据..." : `共召回 ${node.data?.kb_evidence_count ?? kb.length} 条证据`)));
       const lines = kb.map((item, index) => {
-        const top = item.top_diagnosis?.name || item.problem_name || item.run_id || `证据_${index + 1}`;
-        return `${top} · ${item.run_id || "无运行ID"}`;
+        const entryType = item.entry_type || "";
+        const isKbChunk = entryType === "chunk" || entryType.includes("chunk") || entryType.includes("document");
+        const isCase = entryType.includes("case") || item.run_id;
+        const preview = (item.content || item.preview || "").slice(0, 50);
+        if (isKbChunk) {
+          return `知识库_${index + 1} · ${preview}...`;
+        } else if (isCase) {
+          const name = item.top_diagnosis?.name || item.problem_name || "";
+          return `${name} · ${item.run_id || "病例"}`;
+        } else {
+          const name = item.top_diagnosis?.name || item.problem_name || item.run_id || `证据_${index + 1}`;
+          return `${name} · ${item.run_id || "未知来源"}`;
+        }
       });
       card.append(inspectorBlock("召回证据", listNode(lines)));
     } else if (node.kind === "expert") {
@@ -2687,7 +2773,18 @@
         ? reports.quality_issues.map((item) => (item && typeof item === "object" ? [item.source, item.message].filter(Boolean).join(" · ") : `${item}`))
         : [];
       card.append(inspectorBlock("多智能体救治报告", paragraphNode(reports.multi_agent_markdown ? `长度 ${reports.multi_agent_markdown.length} 字符` : "正在生成...")));
-      card.append(inspectorBlock("单模型救治报告", paragraphNode(reports.baseline_markdown ? `长度 ${reports.baseline_markdown.length} 字符` : "正在生成...")));
+      card.append(
+        inspectorBlock(
+          "单模型救治报告",
+          paragraphNode(
+            reports.baseline_disabled
+              ? "未启用（ENABLE_BASELINE_REPORT=false）"
+              : reports.baseline_markdown
+                ? `长度 ${reports.baseline_markdown.length} 字符`
+                : "正在生成..."
+          )
+        )
+      );
       card.append(inspectorBlock("质量提示", listNode(qualityIssues)));
     }
 
@@ -2964,7 +3061,7 @@
 
   async function clearKnowledgeBase(target, targetStatusEl) {
     const body = JSON.stringify({ target });
-    setKbStatus(targetStatusEl, "正在清理知识库...");
+    setKbStatus(targetStatusEl, "正在清理知识库...", { isPending: true });
     try {
       const response = await fetch("/api/v1/knowledge/clear", {
         method: "POST",
@@ -3297,7 +3394,7 @@
     const file = refs.kbUploadFile?.files?.[0] || null;
 
     if (!textContent && !file) {
-      setKbStatus(refs.kbUploadStatus, "请输入文本或选择一个 .txt / .md 文件。", true);
+      setKbStatus(refs.kbUploadStatus, "请输入文本或选择一个 .txt / .md 文件。", { isError: true });
       return;
     }
 
@@ -3308,7 +3405,14 @@
       formData.append("file", file);
     }
 
-    setKbStatus(refs.kbUploadStatus, "正在上传知识条目...");
+    const uploadLabel = file ? file.name : title || "知识条目";
+    setKbUploadLabelUploading(true);
+    setKbStatus(
+      refs.kbUploadStatus,
+      file ? `正在上传「${uploadLabel}」…` : "正在上传知识条目…",
+      { isPending: true },
+    );
+    refs.kbUploadStatus?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     if (refs.kbUploadBtn) {
       refs.kbUploadBtn.disabled = true;
     }
@@ -3321,15 +3425,23 @@
         throw new Error(await response.text());
       }
       const payload = await response.json();
-      setKbStatus(refs.kbUploadStatus, `已上传 ${payload.title || "知识条目"}`);
+      const doneTitle = payload.title || uploadLabel || "知识条目";
+      setKbStatus(
+        refs.kbUploadStatus,
+        `✓ 已上传「${doneTitle}」。条目已出现在下方「已上传文档」列表。`,
+        { isSuccess: true },
+      );
+      refs.kbUploadStatus?.scrollIntoView({ block: "nearest", behavior: "smooth" });
       refs.kbUploadForm?.reset();
       await Promise.all([loadCasesData(), loadKnowledgeDocuments()]);
       if (state.activePage === "kb") {
         renderKbPage();
+        refs.kbDocsList?.scrollIntoView({ block: "nearest", behavior: "smooth" });
       }
     } catch (err) {
-      setKbStatus(refs.kbUploadStatus, `上传失败: ${safeErrorText(err)}`, true);
+      setKbStatus(refs.kbUploadStatus, `上传失败: ${safeErrorText(err)}`, { isError: true });
     } finally {
+      setKbUploadLabelUploading(false);
       if (refs.kbUploadBtn) {
         refs.kbUploadBtn.disabled = false;
       }
@@ -3395,6 +3507,12 @@
   refs.clearKbBtn.addEventListener("click", () => void clearKnowledgeBase(refs.kbTarget.value, refs.kbStatus));
   refs.clearKbBtn2.addEventListener("click", () => void clearKnowledgeBase(refs.kbTarget2.value, refs.kbStatus2));
   refs.kbUploadForm?.addEventListener("submit", (event) => void uploadKnowledgeDocument(event));
+  refs.kbUploadForm?.addEventListener("reset", () => {
+    updateKbFileUploadFeedback();
+  });
+  refs.kbUploadFile?.addEventListener("change", () => {
+    updateKbFileUploadFeedback();
+  });
 
   refs.kbTabs.forEach((button) => {
     button.addEventListener("click", () => renderCasesTab(button.dataset.target || "verified"));

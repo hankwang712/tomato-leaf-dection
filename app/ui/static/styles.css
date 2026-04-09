@@ -528,6 +528,26 @@ textarea {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.file-label.file-label--has-file {
+  border-color: rgba(111, 242, 165, 0.42);
+  background: rgba(111, 242, 165, 0.09);
+  color: var(--text-1);
+}
+
+.file-label.file-label--has-file .file-icon {
+  filter: saturate(1.1);
+}
+
+.file-label.file-label--uploading {
+  border-color: rgba(94, 232, 247, 0.35);
+  background: rgba(94, 232, 247, 0.08);
+}
+
+.file-upload-wrapper.kb-file-upload--busy .file-input {
+  pointer-events: none;
+  cursor: wait;
+}
+
 .image-upload-feedback {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
@@ -676,6 +696,17 @@ button:disabled {
 
 .kb-status.status-error {
   color: #ff9aa2;
+}
+
+.kb-status.status-success {
+  color: var(--ok);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.kb-status.status-pending {
+  color: var(--cyan);
+  font-size: 13px;
 }
 
 .output-panel {
