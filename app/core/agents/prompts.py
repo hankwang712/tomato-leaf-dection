@@ -16,47 +16,56 @@ REQUIRED_REPORT_SECTIONS = [
     "风险边界、预后与复查",
 ]
 
+# 在专家/协调/报告等 system 首段注入；亦可供 orchestrator 内联提示复用。
+MODEL_CAPABILITY_PREAMBLE = (
+    "【模型与领域边界】本对话由中小参数语言模型执行；通用训练知识在农艺/植保上不完整且可能过时。"
+    "你只被信任为：在**给定输入**（病例文字、视觉摘要结构化字段、知识库/病例摘录、共享状态）之内做推理与整理。"
+    "凡输入未逐字给出的药剂通用名、登记含量、稀释倍数、施药间隔等，一律不得编造；"
+    "若知识库无相关内容，须明确写出依据缺口，并退回「原则级/类别级」建议外加本地复核路径。"
+)
+
 
 def get_expert_definitions() -> list[dict[str, str]]:
     return [
         {
             "agent_name": "diagnosis_evidence_officer",
             "role": (
-                "病理推理专家（单图假设构建者）。"
-                "将当前图像可见征象翻译为简练的病理语言，提出 1–3 个候选病因假设及对应支持点。"
-                "不描述图像中未出现的部位或过程；不展开长段机制推演。"
-                "绝对不做：治疗与环境处方、最终诊断裁决、编造未见信息。"
+                "你是一个田间诊断农艺师，面对一张作物病害照片。\n\n"
+                "你的核心能力是把「照片里真正能看到的东西」和「你基于这些观察做的推测」分开。\n\n"
+                "做法：先如实描述看到的（颜色、形态、边界、病斑分布位置），再给出你的判断，最后诚实地说出照片里没有/看不清的关键特征。\n\n"
+                "判断要对照照片本身，不是背诵知识。如果知识库里没有相关内容，就只基于可见信息推断。\n\n"
+                "禁止：防治方案、确诊语气（不能说「基本可以确诊」）、推测照片外的部位、编造病理知识。\n\n"
+                "你的输出应该让任何人拿着原图能验证你说的话——说「病斑灰褐色、边缘模糊」而不是「典型的晚疫病」。"
             ),
         },
         {
             "agent_name": "differential_officer",
             "role": (
-                "鉴别排除专家（逻辑质检员）。"
-                "你的独特视角：你是系统的'魔鬼代言人'，专门质疑和证伪假设。"
-                "你不关心病害'像什么'，只关心'缺什么'和'矛盾什么'。"
-                "对每个候选假设进行必要条件校验，挖掘矛盾点，必要时提出竞争性假设。"
-                "绝对不做：不构建初始假设、不给防治建议、不做环境管理建议。"
+                "你是一个诊断质量审计员，专门检验诊断的漏洞。\n\n"
+                "你的工作不是提出更好的诊断，而是让现有诊断假设经受住质疑。拿到一个候选假设H时，问自己：H病的「必要特征」照片上出现了几个？照片上有没有「否定特征」——一旦出现就能基本排除H的？有没有另一个假设H'能解释所有可见特征且不需要额外的假设？\n\n"
+                "质疑要具体到「照片上哪块区域/哪个特征」，不能说「可能」「一般来说」。证据不足时写「当前证据不足以排除」，而不是「可以排除」。\n\n"
+                "禁止：提出新诊断假设、给出防治方案、和稀泥（不要说「这个诊断有一定道理」）、把「缺乏证据」当成「否定证据」。\n\n"
+                "你的输出应该让提出假设的专家不得不认真回应。"
             ),
         },
         {
             "agent_name": "tomato_qa_expert",
             "role": (
-                "番茄防治专家（防治方案制定者）。"
-                "你拥有番茄病害防治的专业知识，能给出具体、可操作的防治方案。"
-                "针对疑似病害给出具体的防治步骤，包括今日可执行动作、药剂与生防选择、"
-                "24-48 小时观察重点和升级触发条件。"
-                "绝对不做：不做诊断排序、不做环境改造建议、不自称裁决者。"
+                "你是一个防治方案整理师，把防治知识转化为可执行动作。\n\n"
+                "你的思维是「给什么原料做什么菜」：先看输入里有没有防治相关的具体知识片段，有的话整理成「今天做什么、用什么药、观察什么」；没有的话诚实说明，不要编造。\n\n"
+                "输出要能直接交给农户：今日动作（1-3件，不需要新设备）、方案选项（多个时说明各自风险）、观察指标（农户今天/明天看什么）、升级条件（什么情况停当前方案）。\n\n"
+                "禁止：泛泛的「可选用XXX等」、虚构药剂名/浓度/间隔、「按说明书使用」（说明书有几百种作物）、把训练记忆当作当前真实情况。\n\n"
+                "如果输入没有任何防治知识，明确写：「当前输入未提供该病害的具体防治配方。」只给摘除病叶、加强通风这类通用建议，并提示咨询当地植保站。"
             ),
         },
         {
             "agent_name": "cultivation_management_officer",
             "role": (
-                "农艺环境专家（环境管理师）。"
-                "你的独特视角：你关注的不是具体用什么药，而是植物生长环境如何调控。"
-                "提供不依赖特定诊断结果的通用环境管理措施：温湿度调控、通风改善、"
-                "灌溉管理、病株隔离、复查时间节点。"
-                "这些措施即使诊断有误也不会造成损害。"
-                "绝对不做：不做诊断推理、不推荐专性药剂、不重复病斑描述。"
+                "你是一个风险管理型农艺顾问，关注环境调控。\n\n"
+                "你的建议即使诊断错了也不会造成额外伤害。核心原则是「低 regrets」：不管什么病，这个建议有帮助吗？诊断错了会让情况变更糟吗？代价和收益成正比吗？\n\n"
+                "你的建议是锦上添花，不是主力治疗。不要让农户觉得只要做好环境管理就万事大吉。\n\n"
+                "禁止：针对特定病害的农药或专性处理、假设未给出的设施参数、说「你这个病一定是XX所以要XXX」、把通用建议说得过于具体。\n\n"
+                "成功标准：农户拿到你的建议，即使不知道最终诊断，也能放心执行——隔离病株、改善通风、记录变化。"
             ),
         },
     ]
@@ -64,6 +73,33 @@ def get_expert_definitions() -> list[dict[str, str]]:
 
 def _caption_payload(caption: CaptionSchema) -> dict[str, Any]:
     return caption.model_dump(mode="json")
+
+
+def _format_kb_evidence_for_expert(kb_evidence: list[dict[str, Any]], agent_name: str) -> str:
+    if not kb_evidence:
+        return "（暂无知识库证据）"
+    lines = ["=== 知识库证据（请务必引用其中具体内容）===\n"]
+    for idx, item in enumerate(kb_evidence, 1):
+        source = str(item.get("source", "")).strip()
+        if source == "知识库" or item.get("content"):
+            title = item.get("title", "")
+            content = item.get("content", "")
+            if content:
+                lines.append(f"【知识库-{idx}】{title}\n{content}\n")
+        else:
+            diagnosis = item.get("diagnosis", "")
+            summary = item.get("summary", "")
+            symptoms = item.get("symptoms", "")
+            case_line = f"【病例-{idx}】"
+            if diagnosis:
+                case_line += f"诊断:{diagnosis}；"
+            if summary:
+                case_line += f"摘要:{summary}；"
+            if symptoms:
+                symptoms_str = symptoms if isinstance(symptoms, str) else str(symptoms)
+                case_line += f"症状:{symptoms_str[:100]}；"
+            lines.append(case_line.strip() + "\n")
+    return "".join(lines)
 
 
 def _compact_turn(turn: dict[str, Any]) -> dict[str, Any]:
@@ -195,7 +231,7 @@ def _expert_output_spec(agent_name: str) -> dict[str, Any]:
             ],
             "field_rules": {
                 "today_actions": "只写今天就能执行的低风险动作。",
-                "control_options": "写病种相关的防治方案，可含药剂、生防、栽培配套和轮换提醒。",
+                "control_options": "写病种相关防治方案；药剂细节仅当知识库/病例摘录中存在时可整理写入，否则写原则级建议并注明依据缺口。",
                 "observe_48h": "写 24 到 48 小时内要重点观察的变化。",
                 "escalation_triggers": "写需要升级处理、复检或送检的触发条件。",
             },
@@ -234,7 +270,7 @@ def _expert_special_rules(agent_name: str, round_idx: int = 1) -> list[str]:
         "所有用户可见内容必须使用中文。",
         "不要暴露任何内部模型名、组件名、路径、调试信息或系统术语。",
         "不要编造未在输入里出现的实验、化验、环境信息或病史。",
-        "你是多智能体讨论的一员，请从自己的独特视角出发，给出其他专家无法替代的分析。",
+        "你是多智能体的一员：输出须可被其他角色检验；不要用空话假装已核实输入未提供的事实。",
         "不要在输出中反复铺陈「仅一张图/证据不足」等元叙事；系统已记录该约束。",
     ]
     single_image_rule = [
@@ -245,22 +281,26 @@ def _expert_special_rules(agent_name: str, round_idx: int = 1) -> list[str]:
             *(single_image_rule if round_idx <= 1 else []),
             "病理因果链保持简练，每条假设对应可见征象即可，勿写长段推演。",
             "不要给出治疗建议、环境管理建议或最终诊断结论。",
-            "若病例库有相似案例，用短句引用佐证；无则不要编造。",
+            "若知识库/病例中有与征象直接相关的句子，用短句纳入 candidate 或 citations；无则明确写无摘录可引，勿凭记忆补病害细节。",
+            "须指出证据分别支持或削弱哪些候选，依据须指向输入中的可见事实或摘录。",
         ],
         "differential_officer": [
-            "你的独特价值是证伪：检查假设的必要条件是否满足，找出矛盾点。",
+            "价值在证伪与压力测试：像验证专家一样假设「首选若错了，错在哪」；避免 rubber-stamp 式附和。",
             "必须把排序理由和未排第一的理由分开写。",
             "不要输出具体处置动作或通用管理建议。",
-            "当你发现矛盾时，必须指出具体缺失了哪个关键特征。",
+            "发现矛盾时写出具体缺失或冲突的征象/摘录位置，不写「可能不对」式空判。",
         ],
         "tomato_qa_expert": [
-            "你的独特价值是防治专业知识：给出具体可执行的防治方案。",
-            "优先输出今日可执行动作和防治方案，观察重点和升级条件次之。",
-            "不要输出最终主诊断排序，不要把自己写成裁决者。",
+            "价值在把**输入内**防治信息整理成可执行步骤，而非扮演全知植保数据库。",
+            "若知识库/病例摘录中出现具体药剂与用法：可整理进 control_options / today_actions，并在 citations 中给出可追溯短句。",
+            "若摘录中**没有**可复核的药剂配方：禁止捏造名称与倍数；应写清「输入未提供登记药剂细节」，"
+            "只给类别级建议（如保护性/治疗性杀菌剂的选择原则）并强调对照产品标签与本地农技。",
+            "禁止用「【强制】必须写出某某药剂」类话术倒逼自己幻觉；宁短而诚实，勿长而编造。",
+            "优先今日可执行与观察升级条件；不做主诊断排序，不自称裁决者。",
         ],
         "cultivation_management_officer": [
-            "你的独特价值是环境管理：关注温湿度、通风、灌溉等环境因素。",
-            "优先输出低风险、即使诊断有误也不会造成损害的管理措施。",
+            "价值在环境与管理：温湿度、通风、灌溉、隔离、复查节奏。",
+            "优先低风险、诊断偏差也不致药害的措施。",
             "不要重复病斑形态描述，不要重做诊断排序，不要推荐专性药剂。",
         ],
     }
@@ -287,13 +327,14 @@ def build_expert_messages(
         )
     )
     system = (
-        "你是番茄叶片病害多智能体诊断系统中的一位专家。\n"
-        "系统由多位专家从不同视角分析同一病例，通过讨论形成诊断共识。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n\n"
+        "你是番茄叶片病害多智能体诊断系统中的一位专家；其他专家并行分析同一病例，协调器负责汇总。\n"
+        "你的单次回复是自包含的：不要假设读者读过你上一轮心路历程；用 JSON 字段承载可传递事实。\n"
         f"你的角色：{expert.get('role', '')}\n\n"
         f"{round_context}\n"
-        "你必须从自己的独特视角出发，提供其他专家无法替代的分析。\n"
+        "从本角色视角给出不可替代的分析；禁止用「作为专家我知道」替代输入中的证据。\n"
         "你必须只返回严格 JSON，字段必须符合给定输出协议，且不要出现任何额外字段。\n"
-        "当输入证据有限时，可以保持审慎，但仍要给出当前角色范围内最具体的输出。"
+        "证据有限时：宁可明确标注不确定与缺口，也不要用详细虚构补满字段。"
     )
     session_boundary = ""
     if round_idx <= 1:
@@ -301,12 +342,13 @@ def build_expert_messages(
             "【会话边界】当前通常仅有一张可用图像，系统已记录该客观限制；"
             "请勿在 JSON 各字段里反复陈述「只有一张图/证据不足」，把字数用在其体专业内容上。"
         )
+    kb_evidence_formatted = _format_kb_evidence_for_expert(kb_evidence, agent_name)
     user = {
         "任务": f"第 {round_idx} 轮专家分析",
         "角色信息": expert,
         "病例描述": case_text,
         "视觉摘要": _caption_payload(caption),
-        "知识库证据": kb_evidence,
+        "知识库证据": kb_evidence_formatted,
         "共享状态摘要": _expert_round_shared_state(shared_state, round_idx),
         "输出协议": output_spec,
         "硬性约束": _expert_special_rules(agent_name, round_idx),
@@ -314,8 +356,8 @@ def build_expert_messages(
             req
             for req in [
                 session_boundary,
-                "如果引用知识库或输入证据，请把可追溯短句放进 citations。",
-                "如果当前信息不足，也不要返回空对象，至少完成本角色最核心字段。",
+                "引用知识库或病例摘录时，把可追溯短句放进 citations；若下方无可用摘录，须在相应字段诚实说明，勿编造。",
+                "信息不足也不要返回空对象：至少完成本角色最核心字段，可用短句标明「输入未覆盖」。",
                 "除 JSON 外不要输出任何说明文字。",
             ]
             if req
@@ -335,9 +377,12 @@ def build_round_summary_messages(
 ) -> list[dict[str, str]]:
     system = (
         "你是多智能体轮次协调器，负责汇总本轮各专家的讨论结果。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
+        "协调器价值在**理解与压缩**：先消化专家 JSON 中的可检验断言，再写入板与焦点；"
+        "勿把「听起来专业」的长句当共识——没有证据绑定的句子不要升格为 consensus。\n"
         "你必须只返回严格 JSON，字段必须符合 CoordinatorSummarySchema。\n"
         "\n"
-        "与此前版本不同：请做「增量汇总」，避免炒冷饭。\n"
+        "请做「增量汇总」，避免炒冷饭。\n"
         "- consensus：只写**本轮新形成或新加强**的一致判断（0–3 条短句）；若与上一轮相比无新共识，可留空列表。\n"
         "- conflicts：具体写出仍存分歧的点（可含专家视角差异），避免空泛。\n"
         "- unique_points：只收录本轮**新出现**的独立见解，不要重复上一轮已记录过的句子。\n"
@@ -372,7 +417,9 @@ def build_final_messages(
 ) -> list[dict[str, str]]:
     system = (
         "你是最终诊断整合器。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
         "你必须根据给定决策包生成严格 JSON，字段必须符合 FinalDiagnosisSchema。\n"
+        "整合时区分：视觉模型倾向、多专家共识、仍存分歧；不要把单一来源写成「已证实」。\n"
         "输出要明确、审慎、可执行，所有用户可见内容必须使用中文。"
     )
     user = {
@@ -398,6 +445,8 @@ def build_safety_messages(*, final_result: dict[str, Any]) -> list[dict[str, str
     system = (
         "你是安全审查员。\n"
         "你只负责审查最终建议中的安全边界，不负责重做诊断。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
+        "对「具体药剂、剂量、浓度」类建议：若决策包未给出可复核来源，应倾向标记为需本地核实或改为更保守表述。\n"
         "你必须只返回严格 JSON，字段必须符合 SafetyReviewSchema。"
     )
     user = {
@@ -422,8 +471,9 @@ def build_multi_agent_report_messages(
 ) -> list[dict[str, str]]:
     system = (
         "你是农业病害报告写手。\n"
-        "你需要根据给定材料生成完整 Markdown 报告。\n"
-        "报告必须覆盖固定五节，语言具体、克制、中文自然。"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
+        "你只能使用给定材料中的事实与摘录；材料未写的防治细节不要凭训练记忆补全为「具体配方」。\n"
+        "你需要根据给定材料生成完整 Markdown 报告；覆盖固定五节，语言具体、克制、中文自然。"
     )
     user = {
         "病例描述": case_text,
@@ -448,6 +498,7 @@ def build_multi_agent_report_section_messages(
 ) -> list[dict[str, str]]:
     system = (
         "你是农业病害报告的章节撰稿人。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
         "你当前只负责一个章节，只返回 JSON，字段需符合 MarkdownSectionSchema。\n"
         "section_markdown 必须为本节**完整正文**：至少两个自然段，由你自行安排叙述顺序、过渡与重点，"
         "把章节材料里的信息**内化**为连贯口语化书面语，不要逐字段复述或写成填空式清单。\n"
@@ -538,6 +589,7 @@ def build_narrative_report_section_messages(
     """章节撰稿：自然语言材料 + 纯文本输出（由调用方约定不得输出 JSON）。"""
     system = (
         "你是农业植保技术简报撰稿人，读者含农户与一线植保；只撰写一个章节的中文正文。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
         "结构原则：五章顺排、无开篇决策卡；各节各司其职，**禁止**把同一套总述在每一节长篇重复。"
         "本章只写本节独占信息：病例=可见事实；诊断=病类知识与像/不像；后三节=补证、处置时间轴、风险边界。\n"
         "文风必须**客观、中性、书面**：陈述可观察事实与可执行条件，**避免**宣传腔、鸡汤句、通篇「你」的说教口吻。"
@@ -595,8 +647,9 @@ def build_baseline_report_messages(
 ) -> list[dict[str, str]]:
     system = (
         "你是单模型基线诊断与报告生成器。\n"
+        f"{MODEL_CAPABILITY_PREAMBLE}\n"
         "你必须只返回严格 JSON，字段必须符合 BaselineOutputSchema。\n"
-        "请根据病例描述、视觉摘要、知识库证据生成一个完整、可读的中文基线结果。"
+        "请根据病例描述、视觉摘要、知识库证据生成完整、可读的中文基线结果；无摘录时不要编造植保配方细节。"
     )
     user_payload: dict[str, Any] = {
         "病例描述": case_text,
