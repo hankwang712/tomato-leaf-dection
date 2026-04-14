@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -21,6 +22,14 @@ from app.core.llm_clients import build_agent_model_routing, build_llm_client
 from app.core.retrieval.faceted_retriever import FacetedRetriever
 from app.core.retrieval.knowledge_base import GovernanceKnowledgeBase
 from app.core.retrieval.reranker_client import RerankerClient
+from app.core.memory import AgentReflection, EpisodicCaseMemory, MemoryConsolidation
+from app.core.retrieval.source_router import (
+    SourceRouter,
+    build_mechanism_hypotheses,
+    extract_mechanism_tags,
+    extract_mechanism_tags_via_llm,
+    summarize_source_alignment,
+)
 from app.core.storage.case_library import CaseLibrary
 from app.core.storage.run_store import RunStore
 from app.core.vision.dinov3_service import DinoV3Paths, LocalDinoV3Diagnoser
@@ -33,21 +42,29 @@ class DiagnosisPipeline:
         self.settings = settings
         self.run_store = RunStore(settings.run_dir)
         self.case_library = CaseLibrary(settings.cases_dir)
-        self.kb = GovernanceKnowledgeBase(settings.kb_dir)
         reranker = RerankerClient(
             base_url=settings.reranker_base_url,
             api_key=settings.reranker_api_key,
             model=settings.reranker_model,
             timeout=settings.request_timeout,
         )
+        self.kb = GovernanceKnowledgeBase(
+            settings.kb_dir,
+            settings=settings,
+            reranker=reranker,
+        )
         self.retriever = FacetedRetriever(reranker=reranker)
+        llm_client = build_llm_client(settings)
+        self.source_router = SourceRouter(llm_client=llm_client, timeout=settings.request_timeout)
+        self.agent_reflection = AgentReflection(settings.cases_dir)
+        self.episodic_memory = EpisodicCaseMemory(settings.cases_dir)
+        self.memory_consolidation = MemoryConsolidation(settings.cases_dir)
         self.placeholder_caption_provider = HttpPlaceholderCaptionProvider(
             timeout=settings.request_timeout,
             mock_json_path="" if settings.enable_local_qwen3_vl else settings.caption_mock_json_path,
         )
         self.qwen_caption_provider = self._build_qwen_caption_provider(settings)
         self.image_diagnoser = self._build_image_diagnoser(settings)
-        llm_client = build_llm_client(settings)
         agent_model_routing = build_agent_model_routing(settings)
         self.orchestrator = MultiAgentOrchestrator(
             llm_client=llm_client,
@@ -59,8 +76,217 @@ class DiagnosisPipeline:
             max_concurrency_per_route=settings.max_concurrency_per_route,
             structured_max_new_tokens=settings.local_llm_structured_max_new_tokens,
             report_max_new_tokens=settings.local_llm_report_max_new_tokens,
+            enable_baseline_report=settings.enable_baseline_report,
+            memory_dir=settings.cases_dir,
         )
-        self._migrate_legacy_cases_if_needed()
+
+    def _kb_evidence_query(
+        self,
+        problem_name: str,
+        case_text: str,
+        caption: CaptionSchema,
+        *,
+        for_kb: bool = False,
+    ) -> str:
+        """构建检索查询.
+
+        Args:
+            problem_name: 病名/诊断名（作为核心检索词）
+            case_text: 用户可选的当地环境/田间补充说明（表单字段名仍为 case_text）
+            caption: 视觉摘要
+            for_kb: 是否为知识库检索（更注重病名+症状描述）
+        """
+        parts = []
+        if problem_name:
+            parts.append(str(problem_name).strip())
+        if for_kb:
+            if caption.visual_summary:
+                parts.append(str(caption.visual_summary).strip())
+            if case_text:
+                parts.append(str(case_text).strip()[:200])
+        else:
+            if case_text:
+                parts.append(str(case_text).strip())
+            if caption.visual_summary:
+                parts.append(str(caption.visual_summary).strip())
+            parts.append(self.retriever.build_signature(caption))
+        return " ".join(p for p in parts if p).strip()
+
+    def _retrieve_evidence_bundle(
+        self,
+        *,
+        problem_name: str,
+        case_text: str,
+        caption: CaptionSchema,
+        image_display: dict[str, Any] | None,
+        vision_result: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        try:
+            mechanism_tags = extract_mechanism_tags_via_llm(
+                self.source_router.llm_client,
+                caption,
+                case_text=case_text,
+                image_display=image_display,
+                vision_result=vision_result,
+                timeout=self.settings.request_timeout,
+            )
+        except Exception:
+            mechanism_tags = extract_mechanism_tags(
+                caption,
+                case_text=case_text,
+                image_display=image_display,
+                vision_result=vision_result,
+            )
+        case_query = self._kb_evidence_query(problem_name, case_text, caption)
+        kb_query = self._build_kb_specific_query(problem_name, caption)
+        case_support = self.case_library.estimate_case_support(case_query, mechanism_tags)
+        source_routing = self.source_router.route(
+            caption=caption,
+            mechanism_tags=mechanism_tags,
+            case_support=case_support,
+            shared_state={"evidence_gaps": list(caption.followup_questions)},
+        )
+        budgets = source_routing.get("budgets", {}) if isinstance(source_routing.get("budgets"), dict) else {}
+        verified_k = max(1, int(budgets.get("verified_k", 6) or 6))
+        unverified_k = max(1, int(budgets.get("unverified_k", 4) or 4))
+        document_k = max(1, int(budgets.get("document_k", 6) or 6))
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_verified = executor.submit(
+                self.case_library.retrieve_text,
+                case_query,
+                True,
+                verified_k,
+                mechanism_tags,
+            )
+            future_unverified = executor.submit(
+                self.case_library.retrieve_text,
+                case_query,
+                False,
+                unverified_k,
+                mechanism_tags,
+            )
+            future_kb = executor.submit(self.kb.retrieve_documents, kb_query, document_k)
+            verified_records = future_verified.result()
+            unverified_records = future_unverified.result()
+            document_records = future_kb.result()
+
+        for doc in document_records:
+            doc["entry_type"] = "chunk"
+
+        source_agreement, source_conflicts = summarize_source_alignment(
+            caption=caption,
+            mechanism_tags=mechanism_tags,
+            source_routing=source_routing,
+            case_records=verified_records + unverified_records,
+            document_records=document_records,
+        )
+        source_routing = {
+            **source_routing,
+            "source_agreement": source_agreement,
+            "source_conflicts": source_conflicts,
+            "mechanism_hypotheses": build_mechanism_hypotheses(mechanism_tags),
+            "retrieved_counts": {
+                "verified_cases": len(verified_records),
+                "unverified_cases": len(unverified_records),
+                "documents": len(document_records),
+            },
+        }
+        kb_evidence = self.retriever.retrieve(
+            caption=caption,
+            candidates=verified_records + unverified_records + document_records,
+            k=4,
+            query_text=case_query,
+            mechanism_tags=mechanism_tags,
+            source_routing=source_routing,
+        )
+        return {
+            "case_query": case_query,
+            "kb_query": kb_query,
+            "mechanism_tags": mechanism_tags,
+            "source_routing": source_routing,
+            "kb_evidence": kb_evidence,
+        }
+
+    def _build_memory_profile(
+        self,
+        *,
+        caption: CaptionSchema,
+        trace: dict[str, Any],
+        safety_payload: dict[str, Any],
+        case_quality: dict[str, Any],
+        mechanism_tags: dict[str, Any],
+        source_routing: dict[str, Any],
+    ) -> dict[str, Any]:
+        shared_state = trace.get("shared_state", {}) if isinstance(trace.get("shared_state"), dict) else {}
+        uncertainty_score = float(shared_state.get("uncertainty_score", 1.0) or 1.0)
+        quorum_score = float(shared_state.get("quorum_score", 0.0) or 0.0)
+        inhibition_score = float(shared_state.get("inhibition_score", 1.0) or 1.0)
+        source_conflicts = self.orchestrator._unique_strings(shared_state.get("source_conflicts", []))
+        memory_score = self.orchestrator._clamp(
+            (0.24 if bool(safety_payload.get("safety_passed", False)) else 0.0)
+            + (1.0 - uncertainty_score) * 0.22
+            + quorum_score * 0.18
+            + (1.0 - inhibition_score) * 0.16
+            + (1.0 - float(caption.ood_score)) * 0.10
+            + (0.06 if case_quality.get("has_citation") else 0.0)
+            + (0.06 if case_quality.get("has_supporting_evidence") else 0.0)
+        )
+        memory_reasons: list[str] = []
+        if bool(safety_payload.get("safety_passed", False)):
+            memory_reasons.append("safety_passed")
+        if uncertainty_score <= 0.35:
+            memory_reasons.append("low_uncertainty")
+        if inhibition_score <= MultiAgentOrchestrator.INHIBITION_BLOCK_THRESHOLD:
+            memory_reasons.append("low_inhibition")
+        if float(caption.ood_score) <= 0.25:
+            memory_reasons.append("low_ood")
+        if case_quality.get("has_citation"):
+            memory_reasons.append("has_valid_citation")
+        if case_quality.get("has_supporting_evidence"):
+            memory_reasons.append("has_supporting_evidence")
+        if not source_conflicts:
+            memory_reasons.append("low_source_conflict")
+        if mechanism_tags.get("stressor_class") and mechanism_tags.get("stressor_class") != ["unknown"]:
+            memory_reasons.append("mechanism_tags_available")
+        if source_routing.get("mode") == "case_priority":
+            memory_reasons.append("case_priority_route")
+
+        is_reference = (
+            bool(safety_payload.get("safety_passed", False))
+            and case_quality.get("write_verified", False)
+            and uncertainty_score <= 0.35
+            and inhibition_score <= MultiAgentOrchestrator.INHIBITION_BLOCK_THRESHOLD
+            and not source_conflicts
+            and float(caption.ood_score) <= 0.25
+            and memory_score >= 0.66
+        )
+        return {
+            "memory_level": "reference_memory" if is_reference else "candidate_memory",
+            "memory_score": round(float(memory_score), 4),
+            "memory_reasons": memory_reasons,
+            "quorum_score": round(float(quorum_score), 4),
+            "inhibition_score": round(float(inhibition_score), 4),
+        }
+
+    def _build_kb_specific_query(self, problem_name: str, caption: CaptionSchema) -> str:
+        """专为知识库检索构建查询，强调病名和症状特征."""
+        parts = [str(problem_name or "").strip()]
+        s = caption.symptoms
+        symptom_keywords = []
+        if s.color:
+            symptom_keywords.extend([x.value for x in s.color if x.value])
+        if s.spot_shape:
+            symptom_keywords.extend([x.value for x in s.spot_shape if x.value])
+        if s.tissue_state:
+            symptom_keywords.extend([x.value for x in s.tissue_state if x.value])
+        if s.distribution_position:
+            symptom_keywords.extend([x.value for x in s.distribution_position if x.value])
+        if symptom_keywords:
+            parts.append(" ".join(symptom_keywords))
+        if caption.visual_summary:
+            parts.append(str(caption.visual_summary).strip())
+        return " ".join(p for p in parts if p).strip()
 
     def run(
         self,
@@ -104,15 +330,16 @@ class DiagnosisPipeline:
                 else None
             )
 
-            query = f"{problem_name}\n{case_text}\n{self.retriever.build_signature(caption)}"
-            verified_records = self.case_library.retrieve_text(query, verified=True, k=6)
-            unverified_records = self.case_library.retrieve_text(query, verified=False, k=4)
-            document_records = self.kb.retrieve_documents(query, k=4)
-            kb_evidence = self.retriever.retrieve(
+            evidence_bundle = self._retrieve_evidence_bundle(
+                problem_name=problem_name,
+                case_text=case_text,
                 caption=caption,
-                candidates=verified_records + unverified_records + document_records,
-                k=4,
+                image_display=image_display,
+                vision_result=vision_result,
             )
+            mechanism_tags = evidence_bundle["mechanism_tags"]
+            source_routing = evidence_bundle["source_routing"]
+            kb_evidence = evidence_bundle["kb_evidence"]
 
             raw_result = self.orchestrator.run(
                 case_text=case_text,
@@ -120,6 +347,8 @@ class DiagnosisPipeline:
                 kb_evidence=kb_evidence,
                 n_rounds=rounds_to_use,
                 vision_result=vision_result,
+                mechanism_tags=mechanism_tags,
+                source_routing=source_routing,
             )
             return self._finalize_and_save(
                 run_id=run_id,
@@ -136,6 +365,8 @@ class DiagnosisPipeline:
                 slot_extraction=slot_extraction,
                 kb_evidence=kb_evidence,
                 raw_result=raw_result,
+                mechanism_tags=mechanism_tags,
+                source_routing=source_routing,
             )
         except RealOutputRequiredError as err:
             self._save_error_log(
@@ -220,20 +451,23 @@ class DiagnosisPipeline:
                     "display": image_display,
                 }
 
-            query = f"{problem_name}\n{case_text}\n{self.retriever.build_signature(caption)}"
-            verified_records = self.case_library.retrieve_text(query, verified=True, k=6)
-            unverified_records = self.case_library.retrieve_text(query, verified=False, k=4)
-            document_records = self.kb.retrieve_documents(query, k=4)
-            kb_evidence = self.retriever.retrieve(
+            evidence_bundle = self._retrieve_evidence_bundle(
+                problem_name=problem_name,
+                case_text=case_text,
                 caption=caption,
-                candidates=verified_records + unverified_records + document_records,
-                k=4,
+                image_display=image_display,
+                vision_result=vision_result,
             )
+            mechanism_tags = evidence_bundle["mechanism_tags"]
+            source_routing = evidence_bundle["source_routing"]
+            kb_evidence = evidence_bundle["kb_evidence"]
             yield {
                 "type": "kb_ready",
                 "run_id": run_id,
                 "kb_evidence_count": len(kb_evidence),
                 "kb_evidence": kb_evidence,
+                "mechanism_tags": mechanism_tags,
+                "source_routing": source_routing,
             }
 
             raw_result: dict[str, Any] | None = None
@@ -243,6 +477,8 @@ class DiagnosisPipeline:
                 kb_evidence=kb_evidence,
                 n_rounds=rounds_to_use,
                 vision_result=vision_result,
+                mechanism_tags=mechanism_tags,
+                source_routing=source_routing,
             ):
                 if event.get("type") == "orchestrator_complete":
                     result = event.get("result")
@@ -278,6 +514,8 @@ class DiagnosisPipeline:
                 slot_extraction=slot_extraction,
                 kb_evidence=kb_evidence,
                 raw_result=raw_result,
+                mechanism_tags=mechanism_tags,
+                source_routing=source_routing,
             )
             yield {
                 "type": "reports_ready",
@@ -372,8 +610,10 @@ class DiagnosisPipeline:
     def _build_qwen_caption_provider(self, settings: Settings) -> LocalQwen3VLCaptionProvider | None:
         if not settings.enable_local_qwen3_vl:
             return None
+        adapter_dir = settings.qwen3_vl_adapter_model_dir.strip() or None
         provider = LocalQwen3VLCaptionProvider(
             model_dir=settings.qwen3_vl_model_dir,
+            adapter_model_dir=adapter_dir,
             max_new_tokens=settings.qwen3_vl_max_new_tokens,
             prefer_cuda=True,
             timeout=settings.request_timeout,
@@ -405,21 +645,7 @@ class DiagnosisPipeline:
         )
 
     def _migrate_legacy_cases_if_needed(self) -> None:
-        current_cases = self.case_library.load_all_cases()
-        if current_cases.get("total_verified", 0) or current_cases.get("total_unverified", 0):
-            return
-
-        legacy_verified = self.kb.load_cases(verified=True)
-        legacy_unverified = self.kb.load_cases(verified=False)
-        if not legacy_verified and not legacy_unverified:
-            return
-
-        for item in legacy_verified:
-            if isinstance(item, dict):
-                self.case_library.save_case(item, verified=True)
-        for item in legacy_unverified:
-            if isinstance(item, dict):
-                self.case_library.save_case(item, verified=False)
+        return None
 
     def _analyze_image(self, image_bytes: bytes | None) -> dict[str, Any] | None:
         if not image_bytes or self.image_diagnoser is None:
@@ -478,8 +704,19 @@ class DiagnosisPipeline:
         slot_extraction: dict[str, Any] | None,
         kb_evidence: list[dict[str, Any]],
         raw_result: dict[str, Any],
+        mechanism_tags: dict[str, Any],
+        source_routing: dict[str, Any],
     ) -> dict[str, Any]:
         clean_trace = sanitize_trace(raw_result)
+        shared_state = clean_trace.get("shared_state", {}) if isinstance(clean_trace.get("shared_state"), dict) else {}
+        shared_state["mechanism_tags"] = mechanism_tags
+        shared_state["source_routing"] = source_routing
+        shared_state["source_agreement"] = source_routing.get("source_agreement", [])
+        shared_state["source_conflicts"] = source_routing.get("source_conflicts", [])
+        shared_state["mechanism_hypotheses"] = source_routing.get("mechanism_hypotheses", [])
+        if "action_gate" not in shared_state:
+            shared_state["action_gate"] = "balanced"
+        clean_trace["shared_state"] = shared_state
         clean_trace["caption"] = caption_data
         if slot_extraction is not None:
             clean_trace["slot_extraction"] = slot_extraction
@@ -491,6 +728,8 @@ class DiagnosisPipeline:
         if isinstance(raw_result.get("decision_packet"), dict):
             clean_trace["decision_packet"] = raw_result["decision_packet"]
         clean_trace["kb_evidence"] = kb_evidence
+        clean_trace["mechanism_tags"] = mechanism_tags
+        clean_trace["source_routing"] = source_routing
         safety_payload = raw_result.get(
             "safety",
             {
@@ -504,12 +743,29 @@ class DiagnosisPipeline:
                 "evidence_sufficiency": "",
             },
         )
+        case_quality = self.case_library.evaluate_case_quality(clean_trace, safety_payload)
+        memory_profile = self._build_memory_profile(
+            caption=caption,
+            trace=clean_trace,
+            safety_payload=safety_payload,
+            case_quality=case_quality,
+            mechanism_tags=mechanism_tags,
+            source_routing=source_routing,
+        )
+        clean_trace.update(memory_profile)
+        clean_trace["source_agreement"] = source_routing.get("source_agreement", [])
+        clean_trace["source_conflicts"] = source_routing.get("source_conflicts", [])
         if self.settings.strict_real_output:
             self._assert_trace_real_output(clean_trace)
 
         top_nm = str(clean_trace.get("final", {}).get("top_diagnosis", {}).get("name", "") or "").strip()
-        kb_query = f"{top_nm}\n{case_text}"[:600].strip()
-        kb_docs = self.kb.retrieve_documents(kb_query, k=3) if kb_query else []
+        if top_nm:
+            kb_query = f"{top_nm} {case_text}"[:600].strip()
+        else:
+            kb_query = case_text[:600].strip() if case_text else ""
+        kb_docs = self.kb.retrieve_documents(kb_query, k=4) if kb_query else []
+        for doc in kb_docs:
+            doc["entry_type"] = "chunk"
 
         reports_bundle = self.orchestrator.generate_reports(
             case_text=case_text,
@@ -526,6 +782,7 @@ class DiagnosisPipeline:
             multi_agent_markdown=reports_bundle["multi_agent_markdown"],
             baseline_markdown=reports_bundle["baseline_markdown"],
             baseline_error=reports_bundle.get("baseline_error"),
+            baseline_skipped=bool(reports_bundle.get("baseline_disabled")),
         )
 
         clean_trace["report_meta"] = {
@@ -535,10 +792,13 @@ class DiagnosisPipeline:
         }
         if isinstance(reports_bundle.get("baseline_error"), dict):
             clean_trace["report_meta"]["baseline_error"] = reports_bundle["baseline_error"]
+        if reports_bundle.get("baseline_disabled"):
+            clean_trace["report_meta"]["baseline_disabled"] = True
 
         comparison_summary = self._build_comparison_summary(
             final_result=clean_trace["final"],
             baseline_result=reports_bundle["baseline_structured"],
+            baseline_disabled=bool(reports_bundle.get("baseline_disabled")),
         )
         reports_payload = {
             "multi_agent_markdown": reports_bundle["multi_agent_markdown"],
@@ -547,6 +807,8 @@ class DiagnosisPipeline:
             "baseline_meta": reports_bundle["baseline_meta"],
             "quality_issues": report_quality_issues,
         }
+        if reports_bundle.get("baseline_disabled"):
+            reports_payload["baseline_disabled"] = True
         if isinstance(reports_bundle.get("baseline_error"), dict):
             reports_payload["baseline_error"] = reports_bundle["baseline_error"]
         if isinstance(reports_bundle.get("report_packet"), dict):
@@ -562,6 +824,15 @@ class DiagnosisPipeline:
             "comparison_summary": comparison_summary,
             "shared_state": clean_trace.get("shared_state", {}),
             "execution_meta": clean_trace.get("execution_meta", {}),
+            "mechanism_tags": mechanism_tags,
+            "source_routing": source_routing,
+            "memory_level": memory_profile["memory_level"],
+            "memory_score": memory_profile["memory_score"],
+            "memory_reasons": memory_profile["memory_reasons"],
+            "quorum_score": memory_profile["quorum_score"],
+            "inhibition_score": memory_profile["inhibition_score"],
+            "source_agreement": source_routing.get("source_agreement", []),
+            "source_conflicts": source_routing.get("source_conflicts", []),
         }
         if isinstance(clean_trace.get("decision_packet"), dict):
             final_payload["decision_packet"] = clean_trace["decision_packet"]
@@ -592,9 +863,21 @@ class DiagnosisPipeline:
             safety_payload=safety_payload,
             image_display=image_display,
             vision_result=vision_result,
+            mechanism_tags=mechanism_tags,
+            source_routing=source_routing,
+            memory_profile=memory_profile,
         )
-        write_verified = self.case_library.should_write_verified(clean_trace, safety_payload)
+        write_verified = bool(case_quality.get("write_verified", False))
         self.case_library.save_case(case_record, verified=write_verified)
+
+        self._store_episodic_memory(
+            run_id=run_id,
+            caption=caption,
+            mechanism_tags=mechanism_tags,
+            clean_trace=clean_trace,
+            final_payload=final_payload,
+            safety_payload=safety_payload,
+        )
 
         return {
             "run_id": run_id,
@@ -619,6 +902,9 @@ class DiagnosisPipeline:
         safety_payload: dict[str, Any],
         image_display: dict[str, Any] | None,
         vision_result: dict[str, Any] | None,
+        mechanism_tags: dict[str, Any],
+        source_routing: dict[str, Any],
+        memory_profile: dict[str, Any],
     ) -> dict[str, Any]:
         top_diagnosis = final_payload.get("top_diagnosis", {}) if isinstance(final_payload, dict) else {}
         top_name = str(top_diagnosis.get("name", "")).strip() or "未给出主诊断"
@@ -659,8 +945,86 @@ class DiagnosisPipeline:
             "report_summary": case_summary,
             "report_excerpt": str(reports_payload.get("multi_agent_markdown", "")).strip()[:1200],
             "safety_passed": bool(safety_payload.get("safety_passed", False)),
+            "memory_level": memory_profile.get("memory_level", "candidate_memory"),
+            "memory_score": memory_profile.get("memory_score", 0.0),
+            "memory_reasons": memory_profile.get("memory_reasons", []),
+            "mechanism_tags": mechanism_tags,
+            "source_routing": source_routing,
+            "quorum_score": memory_profile.get("quorum_score", 0.0),
+            "inhibition_score": memory_profile.get("inhibition_score", 0.0),
+            "source_agreement": source_routing.get("source_agreement", []),
+            "source_conflicts": source_routing.get("source_conflicts", []),
             "timestamp": datetime.now().isoformat(),
         }
+
+    def _store_episodic_memory(
+        self,
+        *,
+        run_id: str,
+        caption: CaptionSchema,
+        mechanism_tags: dict[str, Any],
+        clean_trace: dict[str, Any],
+        final_payload: dict[str, Any],
+        safety_payload: dict[str, Any],
+    ) -> None:
+        """将诊断过程存储为情景记忆，并记录 Agent 反思。"""
+        try:
+            top_diag = str(final_payload.get("top_diagnosis", {}).get("name", "")).strip()
+            confidence = str(final_payload.get("confidence_statement", "")).strip()
+            shared_state = clean_trace.get("shared_state", {})
+
+            visual_sig = {
+                "color": [v.value for v in caption.symptoms.color],
+                "tissue_state": [v.value for v in caption.symptoms.tissue_state],
+                "spot_shape": [v.value for v in caption.symptoms.spot_shape],
+                "boundary": [v.value for v in caption.symptoms.boundary],
+                "distribution_position": [v.value for v in caption.symptoms.distribution_position],
+                "distribution_pattern": [v.value for v in caption.symptoms.distribution_pattern],
+                "morph_change": [v.value for v in caption.symptoms.morph_change],
+                "co_signs": [v.value for v in caption.symptoms.co_signs],
+            }
+
+            diagnosis_path = []
+            for rnd in clean_trace.get("rounds", []):
+                diagnosis_path.append({
+                    "round": rnd.get("round", 0),
+                    "consensus": list(rnd.get("summary", {}).get("consensus", []))[:3],
+                    "conflicts": list(rnd.get("summary", {}).get("conflicts", []))[:3],
+                })
+
+            self.episodic_memory.store_episode(
+                run_id=run_id,
+                visual_signature=visual_sig,
+                mechanism_tags=mechanism_tags,
+                diagnosis_path=diagnosis_path,
+                final_diagnosis=top_diag,
+                confidence_level=confidence,
+                agent_consensus={
+                    "agreed": list(shared_state.get("consensus", []))[:5],
+                    "disagreed": list(shared_state.get("conflicts", []))[:5],
+                },
+                key_evidence=list(shared_state.get("source_agreement", []))[:5],
+                key_conflicts=list(shared_state.get("source_conflicts", []))[:5],
+                resolution_strategy=str(shared_state.get("action_gate", "balanced")),
+                outcome_quality="high" if safety_payload.get("safety_passed") else "low",
+            )
+
+            for rnd in clean_trace.get("rounds", []):
+                for turn in rnd.get("expert_turns", []):
+                    agent_name = str(turn.get("agent_name", "")).strip()
+                    if not agent_name:
+                        continue
+                    self.agent_reflection.record_reflection(
+                        agent_name=agent_name,
+                        run_id=run_id,
+                        diagnosis_outcome=top_diag,
+                        agent_contribution=str(turn.get("evidence_strength", "")).strip()
+                        or str(turn.get("role", "")).strip()[:100],
+                        behavioral_notes=[],
+                        accuracy_signal="unknown",
+                    )
+        except Exception:
+            pass
 
     def _assert_trace_real_output(self, trace: dict[str, Any]) -> None:
         for round_item in trace.get("rounds", []):
@@ -706,16 +1070,25 @@ class DiagnosisPipeline:
                 raw_error_type="ValueError",
             )
 
-    def _build_comparison_summary(self, final_result: dict[str, Any], baseline_result: dict[str, Any]) -> dict[str, Any]:
+    def _build_comparison_summary(
+        self,
+        final_result: dict[str, Any],
+        baseline_result: dict[str, Any],
+        *,
+        baseline_disabled: bool = False,
+    ) -> dict[str, Any]:
         multi_top = final_result.get("top_diagnosis", {})
         baseline_top = baseline_result.get("top_diagnosis", {})
         multi_name = str(multi_top.get("name", "")).strip()
         baseline_name = str(baseline_top.get("name", "")).strip()
-        return {
+        summary: dict[str, Any] = {
             "multi_agent_top_diagnosis": multi_top,
             "baseline_top_diagnosis": baseline_top,
             "same_top_diagnosis": bool(multi_name and baseline_name and multi_name == baseline_name),
         }
+        if baseline_disabled:
+            summary["baseline_disabled"] = True
+        return summary
 
     def _save_error_log(
         self,
@@ -743,10 +1116,13 @@ class DiagnosisPipeline:
         multi_agent_markdown: str,
         baseline_markdown: str,
         baseline_error: dict[str, Any] | None = None,
+        baseline_skipped: bool = False,
     ) -> list[dict[str, str]]:
         issues: list[dict[str, str]] = []
         checks = [("multi_agent_markdown", multi_agent_markdown)]
-        if baseline_error:
+        if baseline_skipped:
+            pass
+        elif baseline_error:
             issues.append(
                 {
                     "source": "baseline_markdown",
