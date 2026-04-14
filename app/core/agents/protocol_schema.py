@@ -155,7 +155,13 @@ class CoordinatorSummarySchema(BaseModel):
     evidence_gaps: list[str] = Field(default_factory=list)
     recommended_experts: list[str] = Field(default_factory=list)
     uncertainty_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    quorum_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    inhibition_score: float = Field(default=0.0, ge=0.0, le=1.0)
     stop_signal: bool = False
+    source_agreement: list[str] = Field(default_factory=list)
+    source_conflicts: list[str] = Field(default_factory=list)
+    mechanism_hypotheses: list[str] = Field(default_factory=list)
+    action_gate: str = "balanced"
     diagnosis_board: DiagnosisBoardSchema = Field(default_factory=DiagnosisBoardSchema)
     evidence_board: EvidenceGapBoardSchema = Field(default_factory=EvidenceGapBoardSchema)
     action_board: ActionBoardSchema = Field(default_factory=ActionBoardSchema)

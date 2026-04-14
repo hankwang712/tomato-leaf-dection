@@ -21,7 +21,6 @@ from app.core.agents.protocol_schema import (
     TomatoActionTurnSchema,
 )
 
-
 NOISY_PATTERNS = [
     r"<\|start\|>",
     r"<\|channel\|>",
@@ -45,8 +44,8 @@ TEXT_REPLACEMENTS = {
     "补充叶背近景和同叶位复拍图像": "继续保持审慎判断",
     "进一步检验": "进一步观察",
     "进一步检测": "进一步观察",
+    "补图": "继续观察",
 }
-
 
 def _clean_text(text: str) -> str:
     value = re.sub(r"\s+", " ", text).strip()
@@ -58,7 +57,6 @@ def _clean_text(text: str) -> str:
         value = value.replace(source, target)
     return value
 
-
 def _clean_list(values: list[str]) -> list[str]:
     cleaned: list[str] = []
     for item in values:
@@ -66,7 +64,6 @@ def _clean_list(values: list[str]) -> list[str]:
         if text:
             cleaned.append(text)
     return cleaned
-
 
 def _coerce_structured_value(value: Any) -> Any:
     if isinstance(value, (dict, list)):
@@ -87,81 +84,13 @@ def _coerce_structured_value(value: Any) -> Any:
         return value
     return parsed if isinstance(parsed, (dict, list)) else value
 
-
 def _coerce_mapping(value: Any) -> dict[str, Any]:
     parsed = _coerce_structured_value(value)
     return parsed if isinstance(parsed, dict) else {}
 
-
 def _coerce_list(value: Any) -> list[Any]:
     parsed = _coerce_structured_value(value)
     return parsed if isinstance(parsed, list) else []
-
-
-def sanitize_expert_turn(turn: dict[str, Any]) -> dict[str, Any]:
-    model = ExpertTurnSchema.model_validate(turn)
-    data = model.model_dump(mode="json")
-    data["supporting_evidence"] = _clean_list(data.get("supporting_evidence", []))
-    data["counter_evidence"] = _clean_list(data.get("counter_evidence", []))
-    data["actions"] = _clean_list(data.get("actions", []))
-    data["risks"] = _clean_list(data.get("risks", []))
-    data["questions_to_ask"] = _clean_list(data.get("questions_to_ask", []))
-    data["citations"] = _clean_list(data.get("citations", []))
-    for cause in data.get("top_k_causes", []):
-        cause["name"] = _clean_text(cause.get("name", "")) or "unknown"
-        cause["why_like"] = _clean_text(cause.get("why_like", ""))
-        cause["why_unlike"] = _clean_text(cause.get("why_unlike", ""))
-    if data.get("meta"):
-        data["meta"] = CallMetaSchema.model_validate(data["meta"]).model_dump(mode="json")
-    return data
-
-
-def sanitize_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    raw_summary = dict(summary)
-    if isinstance(raw_summary.get("evidence_board"), list) and "diagnosis_evidence" not in raw_summary:
-        raw_summary["diagnosis_evidence"] = raw_summary.get("evidence_board", [])
-        raw_summary["evidence_board"] = {
-            "missing_evidence": raw_summary.get("evidence_gaps", []),
-            "verification_value": raw_summary.get("verification_tasks", []),
-        }
-    model = CoordinatorSummarySchema.model_validate(raw_summary)
-    data = model.model_dump(mode="json")
-    for key in (
-        "consensus",
-        "conflicts",
-        "unique_points",
-        "next_focus",
-        "safety_flags",
-        "working_diagnoses",
-        "open_questions",
-        "evidence_gaps",
-        "recommended_experts",
-        "action_focus",
-        "verification_tasks",
-        "uncertainty_triggers",
-        "report_priority",
-    ):
-        data[key] = _clean_list(data.get(key, []))
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-    cleaned_board: list[dict[str, Any]] = []
-    for item in data.get("evidence_board", []):
-        if not isinstance(item, dict):
-            continue
-        diagnosis = _clean_text(str(item.get("diagnosis", "")))
-        if not diagnosis:
-            continue
-        cleaned_board.append(
-            {
-                "diagnosis": diagnosis,
-                "supporting": _clean_list(item.get("supporting", [])),
-                "counter": _clean_list(item.get("counter", [])),
-                "missing": _clean_list(item.get("missing", [])),
-                "sources": _clean_list(item.get("sources", [])),
-            }
-        )
-    data["evidence_board"] = cleaned_board
-    return data
-
 
 def sanitize_final(final_result: dict[str, Any]) -> dict[str, Any]:
     model = FinalDiagnosisSchema.model_validate(final_result)
@@ -217,7 +146,6 @@ def sanitize_final(final_result: dict[str, Any]) -> dict[str, Any]:
     data["rescue_plan"] = cleaned_plan
     return data
 
-
 def sanitize_trace(raw: dict[str, Any]) -> dict[str, Any]:
     rounds: list[dict[str, Any]] = []
     for round_item in raw.get("rounds", []):
@@ -247,54 +175,6 @@ def sanitize_trace(raw: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, (dict, list)):
             clean[key] = value
     return clean
-
-
-def sanitize_shared_state(shared_state: dict[str, Any]) -> dict[str, Any]:
-    data = dict(shared_state)
-    if isinstance(data.get("evidence_board"), list) and "diagnosis_evidence" not in data:
-        data["diagnosis_evidence"] = data.get("evidence_board", [])
-        data["evidence_board"] = {
-            "missing_evidence": data.get("evidence_gaps", []),
-            "verification_value": data.get("verification_tasks", []),
-        }
-    for key in (
-        "consensus",
-        "conflicts",
-        "unique_points",
-        "next_focus",
-        "safety_flags",
-        "working_diagnoses",
-        "open_questions",
-        "evidence_gaps",
-        "recommended_experts",
-        "active_agents",
-        "proposed_actions",
-        "action_focus",
-        "verification_tasks",
-        "uncertainty_triggers",
-        "report_priority",
-    ):
-        data[key] = _clean_list(data.get(key, []))
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-    cleaned_board: list[dict[str, Any]] = []
-    for item in data.get("evidence_board", []):
-        if not isinstance(item, dict):
-            continue
-        diagnosis = _clean_text(str(item.get("diagnosis", "")))
-        if not diagnosis:
-            continue
-        cleaned_board.append(
-            {
-                "diagnosis": diagnosis,
-                "supporting": _clean_list(item.get("supporting", [])),
-                "counter": _clean_list(item.get("counter", [])),
-                "missing": _clean_list(item.get("missing", [])),
-                "sources": _clean_list(item.get("sources", [])),
-            }
-        )
-    data["evidence_board"] = cleaned_board
-    return data
-
 
 _ROLE_LIST_FIELDS = {
     "diagnosis_evidence_officer": ["visible_findings", "negative_findings", "citations"],
@@ -343,7 +223,6 @@ _ROLE_MODELS = {
     "risk_compliance_officer": RiskComplianceTurnSchema,
 }
 
-
 def _normalize_agent_name(turn: dict[str, Any]) -> str:
     agent_name = str(turn.get("agent_name", "")).strip()
     if agent_name in _ROLE_MODELS:
@@ -362,11 +241,9 @@ def _normalize_agent_name(turn: dict[str, Any]) -> str:
         return "risk_compliance_officer"
     return agent_name
 
-
 def _role_model_for_turn(turn: dict[str, Any]):
     agent_name = _normalize_agent_name(turn)
     return _ROLE_MODELS.get(agent_name, ExpertTurnSchema)
-
 
 def _clean_role_lists(agent_name: str, data: dict[str, Any]) -> None:
     pattern = _ROLE_VIOLATION_PATTERNS.get(agent_name)
@@ -380,39 +257,6 @@ def _clean_role_lists(agent_name: str, data: dict[str, Any]) -> None:
         if pattern is not None and pattern.search(text):
             text = ""
         data[key] = text
-
-
-def _clean_candidate_causes(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for item in _coerce_list(values):
-        item = _coerce_mapping(item)
-        if not item:
-            continue
-        name = _clean_text(str(item.get("name", ""))) or "unknown"
-        why_like = _clean_text(str(item.get("why_like", "")))
-        why_unlike = _clean_text(str(item.get("why_unlike", "")))
-        cleaned.append({"name": name, "why_like": why_like, "why_unlike": why_unlike})
-    return cleaned
-
-
-def _clean_ranked_differentials(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for item in _coerce_list(values):
-        item = _coerce_mapping(item)
-        if not item:
-            continue
-        name = _clean_text(str(item.get("name", "")))
-        if not name:
-            continue
-        cleaned.append(
-            {
-                "name": name,
-                "why_supported": _clean_text(str(item.get("why_supported", ""))),
-                "why_not_primary": _clean_text(str(item.get("why_not_primary", ""))),
-            }
-        )
-    return cleaned
-
 
 def _build_compat_turn(agent_name: str, data: dict[str, Any]) -> dict[str, Any]:
     compat = {
@@ -479,7 +323,6 @@ def _build_compat_turn(agent_name: str, data: dict[str, Any]) -> dict[str, Any]:
         compat["questions_to_ask"] = list(data.get("confidence_boundary", []))
     return compat
 
-
 def _mark_invalid_if_empty(agent_name: str, data: dict[str, Any]) -> None:
     required_map = {
         "diagnosis_evidence_officer": bool(data.get("candidate_causes")),
@@ -492,7 +335,6 @@ def _mark_invalid_if_empty(agent_name: str, data: dict[str, Any]) -> None:
     }
     if agent_name in required_map and not required_map[agent_name]:
         data["invalid_turn"] = True
-
 
 def sanitize_expert_turn(turn: dict[str, Any]) -> dict[str, Any]:
     agent_name = _normalize_agent_name(turn)
@@ -525,204 +367,6 @@ def sanitize_expert_turn(turn: dict[str, Any]) -> dict[str, Any]:
         data["meta"] = CallMetaSchema.model_validate(data["meta"]).model_dump(mode="json")
     return data
 
-
-def _clean_diagnosis_evidence_entries(values: Any) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for item in _coerce_list(values):
-        item = _coerce_mapping(item)
-        if not item:
-            continue
-        diagnosis = _clean_text(str(item.get("diagnosis", "")))
-        if not diagnosis:
-            continue
-        cleaned.append(
-            {
-                "diagnosis": diagnosis,
-                "supporting": _clean_list(item.get("supporting", [])),
-                "counter": _clean_list(item.get("counter", [])),
-                "missing": _clean_list(item.get("missing", [])),
-                "sources": _clean_list(item.get("sources", [])),
-            }
-        )
-    return cleaned
-
-
-def sanitize_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    model = CoordinatorSummarySchema.model_validate(summary)
-    data = model.model_dump(mode="json")
-    for key in (
-        "consensus",
-        "conflicts",
-        "unique_points",
-        "next_focus",
-        "safety_flags",
-        "working_diagnoses",
-        "open_questions",
-        "evidence_gaps",
-        "recommended_experts",
-        "action_focus",
-        "verification_tasks",
-        "uncertainty_triggers",
-        "report_priority",
-    ):
-        data[key] = _clean_list(data.get(key, []))
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-    data["diagnosis_board"] = DiagnosisBoardSchema.model_validate(
-        {
-            "working_diagnoses": _clean_list(data.get("diagnosis_board", {}).get("working_diagnoses", [])),
-            "supporting": _clean_list(data.get("diagnosis_board", {}).get("supporting", [])),
-            "counter": _clean_list(data.get("diagnosis_board", {}).get("counter", [])),
-            "differentials": _clean_ranked_differentials(data.get("diagnosis_board", {}).get("differentials", [])),
-        }
-    ).model_dump(mode="json")
-    data["evidence_board"] = EvidenceGapBoardSchema.model_validate(
-        {
-            "missing_evidence": _clean_list(data.get("evidence_board", {}).get("missing_evidence", [])),
-            "verification_value": _clean_list(data.get("evidence_board", {}).get("verification_value", [])),
-        }
-    ).model_dump(mode="json")
-    data["action_board"] = ActionBoardSchema.model_validate(
-        {
-            "today_actions": _clean_list(data.get("action_board", {}).get("today_actions", [])),
-            "control_options": _clean_list(data.get("action_board", {}).get("control_options", [])),
-            "observe_48h": _clean_list(data.get("action_board", {}).get("observe_48h", [])),
-            "escalation_triggers": _clean_list(data.get("action_board", {}).get("escalation_triggers", [])),
-            "management_timeline": _clean_list(data.get("action_board", {}).get("management_timeline", [])),
-            "low_risk_actions": _clean_list(data.get("action_board", {}).get("low_risk_actions", [])),
-            "environment_adjustments": _clean_list(data.get("action_board", {}).get("environment_adjustments", [])),
-            "followup_nodes": _clean_list(data.get("action_board", {}).get("followup_nodes", [])),
-        }
-    ).model_dump(mode="json")
-    data["risk_board"] = RiskBoardSchema.model_validate(
-        {
-            "prohibited_actions": _clean_list(data.get("risk_board", {}).get("prohibited_actions", [])),
-            "risk_flags": _clean_list(data.get("risk_board", {}).get("risk_flags", [])),
-            "confidence_boundary": _clean_list(data.get("risk_board", {}).get("confidence_boundary", [])),
-            "overtreatment_risks": _clean_list(data.get("risk_board", {}).get("overtreatment_risks", [])),
-            "undertreatment_risks": _clean_list(data.get("risk_board", {}).get("undertreatment_risks", [])),
-        }
-    ).model_dump(mode="json")
-    data["diagnosis_evidence"] = _clean_diagnosis_evidence_entries(data.get("diagnosis_evidence", []))
-    return data
-
-
-def _sanitize_summary_v3(summary: dict[str, Any]) -> dict[str, Any]:
-    model = CoordinatorSummarySchema.model_validate(summary)
-    data = model.model_dump(mode="json")
-    for key in ("consensus", "unique_points", "safety_flags", "recommended_experts", "action_focus", "report_priority"):
-        data[key] = _clean_list(data.get(key, []))
-
-    working_diagnoses = _clean_diagnosis_names(data.get("working_diagnoses", []))
-    data["working_diagnoses"] = working_diagnoses
-    data["open_questions"] = _clean_gap_like_list(data.get("open_questions", []))
-    data["evidence_gaps"] = _clean_gap_like_list(data.get("evidence_gaps", []))
-    data["verification_tasks"] = _clean_verification_value_list(data.get("verification_tasks", []))
-    data["conflicts"] = _clean_counter_like_list(data.get("conflicts", []), working_diagnoses)
-    data["next_focus"] = _clean_counter_like_list(data.get("next_focus", []), working_diagnoses)
-    data["uncertainty_triggers"] = _clean_counter_like_list(data.get("uncertainty_triggers", []), working_diagnoses)
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-
-    diagnosis_board = data.get("diagnosis_board", {}) if isinstance(data.get("diagnosis_board"), dict) else {}
-    board_diagnoses = _clean_diagnosis_names(diagnosis_board.get("working_diagnoses", [])) or working_diagnoses
-    data["diagnosis_board"] = DiagnosisBoardSchema.model_validate(
-        {
-            "working_diagnoses": board_diagnoses,
-            "supporting": _clean_list(diagnosis_board.get("supporting", [])),
-            "counter": _clean_counter_like_list(diagnosis_board.get("counter", []), board_diagnoses),
-            "differentials": _clean_ranked_differentials(diagnosis_board.get("differentials", [])),
-        }
-    ).model_dump(mode="json")
-    data["evidence_board"] = EvidenceGapBoardSchema.model_validate(
-        {
-            "missing_evidence": _clean_gap_like_list(data.get("evidence_board", {}).get("missing_evidence", [])),
-            "verification_value": _clean_verification_value_list(data.get("evidence_board", {}).get("verification_value", [])),
-        }
-    ).model_dump(mode="json")
-    data["action_board"] = ActionBoardSchema.model_validate(
-        {
-            "today_actions": _clean_list(data.get("action_board", {}).get("today_actions", [])),
-            "control_options": _clean_list(data.get("action_board", {}).get("control_options", [])),
-            "observe_48h": _clean_gap_like_list(data.get("action_board", {}).get("observe_48h", [])),
-            "escalation_triggers": _clean_action_trigger_list(data.get("action_board", {}).get("escalation_triggers", [])),
-            "management_timeline": _clean_list(data.get("action_board", {}).get("management_timeline", [])),
-            "low_risk_actions": _clean_list(data.get("action_board", {}).get("low_risk_actions", [])),
-            "environment_adjustments": _clean_list(data.get("action_board", {}).get("environment_adjustments", [])),
-            "followup_nodes": _clean_gap_like_list(data.get("action_board", {}).get("followup_nodes", [])),
-        }
-    ).model_dump(mode="json")
-    data["risk_board"] = RiskBoardSchema.model_validate(
-        {
-            "prohibited_actions": _clean_list(data.get("risk_board", {}).get("prohibited_actions", [])),
-            "risk_flags": _clean_list(data.get("risk_board", {}).get("risk_flags", [])),
-            "confidence_boundary": _clean_gap_like_list(data.get("risk_board", {}).get("confidence_boundary", [])),
-            "overtreatment_risks": _clean_list(data.get("risk_board", {}).get("overtreatment_risks", [])),
-            "undertreatment_risks": _clean_list(data.get("risk_board", {}).get("undertreatment_risks", [])),
-        }
-    ).model_dump(mode="json")
-    data["diagnosis_evidence"] = _clean_diagnosis_evidence_entries(data.get("diagnosis_evidence", []))
-    return data
-
-
-def _sanitize_shared_state_v3(shared_state: dict[str, Any]) -> dict[str, Any]:
-    data = dict(shared_state)
-    for key in ("consensus", "unique_points", "safety_flags", "recommended_experts", "active_agents", "proposed_actions", "action_focus", "report_priority"):
-        data[key] = _clean_list(data.get(key, []))
-
-    working_diagnoses = _clean_diagnosis_names(data.get("working_diagnoses", []))
-    data["working_diagnoses"] = working_diagnoses
-    data["open_questions"] = _clean_gap_like_list(data.get("open_questions", []))
-    data["evidence_gaps"] = _clean_gap_like_list(data.get("evidence_gaps", []))
-    data["verification_tasks"] = _clean_verification_value_list(data.get("verification_tasks", []))
-    data["conflicts"] = _clean_counter_like_list(data.get("conflicts", []), working_diagnoses)
-    data["next_focus"] = _clean_counter_like_list(data.get("next_focus", []), working_diagnoses)
-    data["uncertainty_triggers"] = _clean_counter_like_list(data.get("uncertainty_triggers", []), working_diagnoses)
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-
-    diagnosis_board = data.get("diagnosis_board", {}) if isinstance(data.get("diagnosis_board"), dict) else {}
-    board_diagnoses = _clean_diagnosis_names(diagnosis_board.get("working_diagnoses", [])) or working_diagnoses
-    data["diagnosis_board"] = DiagnosisBoardSchema.model_validate(
-        {
-            "working_diagnoses": board_diagnoses,
-            "supporting": _clean_list(diagnosis_board.get("supporting", [])),
-            "counter": _clean_counter_like_list(diagnosis_board.get("counter", []), board_diagnoses),
-            "differentials": _clean_ranked_differentials(diagnosis_board.get("differentials", [])),
-        }
-    ).model_dump(mode="json")
-    data["evidence_board"] = EvidenceGapBoardSchema.model_validate(
-        {
-            "missing_evidence": _clean_gap_like_list(data.get("evidence_board", {}).get("missing_evidence", [])),
-            "verification_value": _clean_verification_value_list(data.get("evidence_board", {}).get("verification_value", [])),
-        }
-    ).model_dump(mode="json")
-    data["action_board"] = ActionBoardSchema.model_validate(
-        {
-            "today_actions": _clean_list(data.get("action_board", {}).get("today_actions", [])),
-            "control_options": _clean_list(data.get("action_board", {}).get("control_options", [])),
-            "observe_48h": _clean_gap_like_list(data.get("action_board", {}).get("observe_48h", [])),
-            "escalation_triggers": _clean_action_trigger_list(data.get("action_board", {}).get("escalation_triggers", [])),
-            "management_timeline": _clean_list(data.get("action_board", {}).get("management_timeline", [])),
-            "low_risk_actions": _clean_list(data.get("action_board", {}).get("low_risk_actions", [])),
-            "environment_adjustments": _clean_list(data.get("action_board", {}).get("environment_adjustments", [])),
-            "followup_nodes": _clean_gap_like_list(data.get("action_board", {}).get("followup_nodes", [])),
-        }
-    ).model_dump(mode="json")
-    data["risk_board"] = RiskBoardSchema.model_validate(
-        {
-            "prohibited_actions": _clean_list(data.get("risk_board", {}).get("prohibited_actions", [])),
-            "risk_flags": _clean_list(data.get("risk_board", {}).get("risk_flags", [])),
-            "confidence_boundary": _clean_gap_like_list(data.get("risk_board", {}).get("confidence_boundary", [])),
-            "overtreatment_risks": _clean_list(data.get("risk_board", {}).get("overtreatment_risks", [])),
-            "undertreatment_risks": _clean_list(data.get("risk_board", {}).get("undertreatment_risks", [])),
-        }
-    ).model_dump(mode="json")
-    data["diagnosis_evidence"] = _clean_diagnosis_evidence_entries(data.get("diagnosis_evidence", []))
-    return data
-
-
-sanitize_summary = _sanitize_summary_v3
-sanitize_shared_state = _sanitize_shared_state_v3
-
-
 _DIAGNOSIS_NAME_MAP = {
     "Tomato___Bacterial_spot": "细菌性斑点病",
     "Tomato___Early_blight": "早疫病",
@@ -739,17 +383,20 @@ _DIAGNOSIS_NAME_MAP = {
     "番茄叶霉病": "叶霉病",
 }
 
-_PLACEHOLDER_TOKENS = {"无法判断", "未知", "unknown", "待确认", "待进一步确认"}
+_PLACEHOLDER_TOKENS = {"无法判断", "未知", "unknown", "待确认", "待进一步确认", "[]", "[ ]"}
 _PEST_ABSENCE_HINTS = ("未观察到明显的虫害迹象", "未见明显虫害", "无明显虫害", "未见虫害")
 _PEST_DIAGNOSIS_HINTS = ("螨", "虫")
-
 
 def _normalize_diagnosis_name(value: Any) -> str:
     text = _clean_text(str(value))
     if not text:
         return ""
+    # 9B 模型常把「空列表」占位符抄成病名字符串，避免进入下游映射成「未映射类别（[]）」
+    if text.strip() in ("[]", "[ ]", "{}", "{ }", "null", "none", "undefined"):
+        return ""
+    if text.strip().lower() in ("unknown",):
+        return ""
     return _DIAGNOSIS_NAME_MAP.get(text, text)
-
 
 def _clean_diagnosis_names(values: Any) -> list[str]:
     names: list[str] = []
@@ -758,7 +405,6 @@ def _clean_diagnosis_names(values: Any) -> list[str]:
         if name and name not in names:
             names.append(name)
     return names
-
 
 def _is_placeholder_text(value: Any) -> bool:
     text = _clean_text(str(value))
@@ -773,10 +419,8 @@ def _is_placeholder_text(value: Any) -> bool:
         return True
     return False
 
-
 def _has_pest_diagnosis(diagnoses: list[str]) -> bool:
     return any(any(hint in name for hint in _PEST_DIAGNOSIS_HINTS) for name in diagnoses)
-
 
 def _clean_gap_like_list(values: Any) -> list[str]:
     cleaned: list[str] = []
@@ -787,7 +431,6 @@ def _clean_gap_like_list(values: Any) -> list[str]:
             continue
         cleaned.append(text)
     return cleaned
-
 
 def _clean_verification_value_list(values: Any) -> list[str]:
     cleaned: list[str] = []
@@ -800,7 +443,6 @@ def _clean_verification_value_list(values: Any) -> list[str]:
             continue
         cleaned.append(text)
     return cleaned
-
 
 def _clean_counter_like_list(values: Any, diagnoses: list[str]) -> list[str]:
     cleaned: list[str] = []
@@ -815,7 +457,6 @@ def _clean_counter_like_list(values: Any, diagnoses: list[str]) -> list[str]:
         cleaned.append(text)
     return cleaned
 
-
 def _clean_action_trigger_list(values: Any) -> list[str]:
     cleaned: list[str] = []
     source = _coerce_list(values) if not isinstance(values, list) else values
@@ -826,19 +467,17 @@ def _clean_action_trigger_list(values: Any) -> list[str]:
         cleaned.append(text)
     return cleaned
 
-
 def _clean_candidate_causes(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     for item in _coerce_list(values):
         item = _coerce_mapping(item)
         if not item:
             continue
-        name = _normalize_diagnosis_name(item.get("name", "")) or "unknown"
+        name = _normalize_diagnosis_name(item.get("name", "")) or "待复核病害"
         why_like = _clean_text(str(item.get("why_like", "")))
         why_unlike = _clean_text(str(item.get("why_unlike", "")))
         cleaned.append({"name": name, "why_like": why_like, "why_unlike": why_unlike})
     return cleaned
-
 
 def _clean_ranked_differentials(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
@@ -857,7 +496,6 @@ def _clean_ranked_differentials(values: list[dict[str, Any]]) -> list[dict[str, 
             }
         )
     return cleaned
-
 
 def _clean_diagnosis_evidence_entries(values: Any) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
@@ -879,7 +517,6 @@ def _clean_diagnosis_evidence_entries(values: Any) -> list[dict[str, Any]]:
         )
     return cleaned
 
-
 def sanitize_summary(summary: dict[str, Any]) -> dict[str, Any]:
     model = CoordinatorSummarySchema.model_validate(summary)
     data = model.model_dump(mode="json")
@@ -935,63 +572,6 @@ def sanitize_summary(summary: dict[str, Any]) -> dict[str, Any]:
     ).model_dump(mode="json")
     data["diagnosis_evidence"] = _clean_diagnosis_evidence_entries(data.get("diagnosis_evidence", []))
     return data
-
-
-def sanitize_shared_state(shared_state: dict[str, Any]) -> dict[str, Any]:
-    data = dict(shared_state)
-    for key in ("consensus", "unique_points", "safety_flags", "recommended_experts", "active_agents", "proposed_actions", "action_focus", "report_priority"):
-        data[key] = _clean_list(data.get(key, []))
-
-    working_diagnoses = _clean_diagnosis_names(data.get("working_diagnoses", []))
-    data["working_diagnoses"] = working_diagnoses
-    data["open_questions"] = _clean_gap_like_list(data.get("open_questions", []))
-    data["evidence_gaps"] = _clean_gap_like_list(data.get("evidence_gaps", []))
-    data["verification_tasks"] = _clean_verification_value_list(data.get("verification_tasks", []))
-    data["conflicts"] = _clean_counter_like_list(data.get("conflicts", []), working_diagnoses)
-    data["next_focus"] = _clean_counter_like_list(data.get("next_focus", []), working_diagnoses)
-    data["uncertainty_triggers"] = _clean_counter_like_list(data.get("uncertainty_triggers", []), working_diagnoses)
-    data["evidence_sufficiency"] = _clean_text(str(data.get("evidence_sufficiency", "")))
-
-    diagnosis_board = data.get("diagnosis_board", {}) if isinstance(data.get("diagnosis_board"), dict) else {}
-    board_diagnoses = _clean_diagnosis_names(diagnosis_board.get("working_diagnoses", [])) or working_diagnoses
-    data["diagnosis_board"] = DiagnosisBoardSchema.model_validate(
-        {
-            "working_diagnoses": board_diagnoses,
-            "supporting": _clean_list(diagnosis_board.get("supporting", [])),
-            "counter": _clean_counter_like_list(diagnosis_board.get("counter", []), board_diagnoses),
-            "differentials": _clean_ranked_differentials(diagnosis_board.get("differentials", [])),
-        }
-    ).model_dump(mode="json")
-    data["evidence_board"] = EvidenceGapBoardSchema.model_validate(
-        {
-            "missing_evidence": _clean_gap_like_list(data.get("evidence_board", {}).get("missing_evidence", [])),
-            "verification_value": _clean_verification_value_list(data.get("evidence_board", {}).get("verification_value", [])),
-        }
-    ).model_dump(mode="json")
-    data["action_board"] = ActionBoardSchema.model_validate(
-        {
-            "today_actions": _clean_list(data.get("action_board", {}).get("today_actions", [])),
-            "control_options": _clean_list(data.get("action_board", {}).get("control_options", [])),
-            "observe_48h": _clean_gap_like_list(data.get("action_board", {}).get("observe_48h", [])),
-            "escalation_triggers": _clean_action_trigger_list(data.get("action_board", {}).get("escalation_triggers", [])),
-            "management_timeline": _clean_list(data.get("action_board", {}).get("management_timeline", [])),
-            "low_risk_actions": _clean_list(data.get("action_board", {}).get("low_risk_actions", [])),
-            "environment_adjustments": _clean_list(data.get("action_board", {}).get("environment_adjustments", [])),
-            "followup_nodes": _clean_gap_like_list(data.get("action_board", {}).get("followup_nodes", [])),
-        }
-    ).model_dump(mode="json")
-    data["risk_board"] = RiskBoardSchema.model_validate(
-        {
-            "prohibited_actions": _clean_list(data.get("risk_board", {}).get("prohibited_actions", [])),
-            "risk_flags": _clean_list(data.get("risk_board", {}).get("risk_flags", [])),
-            "confidence_boundary": _clean_gap_like_list(data.get("risk_board", {}).get("confidence_boundary", [])),
-            "overtreatment_risks": _clean_list(data.get("risk_board", {}).get("overtreatment_risks", [])),
-            "undertreatment_risks": _clean_list(data.get("risk_board", {}).get("undertreatment_risks", [])),
-        }
-    ).model_dump(mode="json")
-    data["diagnosis_evidence"] = _clean_diagnosis_evidence_entries(data.get("diagnosis_evidence", []))
-    return data
-
 
 def sanitize_shared_state(shared_state: dict[str, Any]) -> dict[str, Any]:
     data = dict(shared_state)

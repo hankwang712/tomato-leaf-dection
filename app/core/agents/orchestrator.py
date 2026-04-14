@@ -8,7 +8,9 @@ from typing import Any, Type
 
 from pydantic import BaseModel
 
+from app.core.agents.personas import get_expert_definitions
 from app.core.agents.prompts import (
+    MODEL_CAPABILITY_PREAMBLE,
     REQUIRED_REPORT_SECTIONS,
     build_baseline_report_messages,
     build_expert_messages,
@@ -17,7 +19,6 @@ from app.core.agents.prompts import (
     build_narrative_report_section_messages,
     build_round_summary_messages,
     build_safety_messages,
-    get_expert_definitions,
 )
 from app.core.agents.report_quality import validate_markdown_report, validate_report_section
 from app.core.agents.protocol_schema import (
@@ -43,7 +44,8 @@ from app.core.agents.report_packet import (
     build_report_packet,
     build_report_writer_narrative_briefing,
 )
-from app.core.agents.sanitizer import sanitize_expert_turn
+from app.core.agents.sanitizer import sanitize_expert_turn, sanitize_summary
+from app.core.vision.presentation import class_name_to_cn
 from app.core.caption.schema import CaptionSchema
 from app.core.errors import RealOutputRequiredError
 from app.core.llm_clients import LLMRoute, RoutedLLMClient
@@ -61,6 +63,9 @@ class MultiAgentOrchestrator:
         "cultivation_management_officer",
     )
 
+    QUORUM_STOP_THRESHOLD = 0.72
+    INHIBITION_BLOCK_THRESHOLD = 0.42
+
     def __init__(
         self,
         llm_client: RoutedLLMClient,
@@ -72,16 +77,21 @@ class MultiAgentOrchestrator:
         max_concurrency_per_route: int = 2,
         structured_max_new_tokens: int = 768,
         report_max_new_tokens: int = 1400,
+        enable_baseline_report: bool = True,
+        memory_dir: str = "",
     ):
         self.llm_client = llm_client
         self.agent_model_routing = agent_model_routing
         self.max_retries = max_retries
         self.timeout = timeout
         self.strict_real_output = strict_real_output
+        self.enable_baseline_report = enable_baseline_report
         self.max_parallel_agents_per_layer = max(1, int(max_parallel_agents_per_layer))
         self.max_concurrency_per_route = max(1, int(max_concurrency_per_route))
         self.structured_max_new_tokens = max(128, int(structured_max_new_tokens))
         self.report_max_new_tokens = max(256, int(report_max_new_tokens))
+        self.quorum_stop_threshold = self.QUORUM_STOP_THRESHOLD
+        self.inhibition_block_threshold = self.INHIBITION_BLOCK_THRESHOLD
         self.experts = get_expert_definitions()
         self.expert_lookup = {expert["agent_name"]: expert for expert in self.experts}
         self.concurrency_controller = RouteConcurrencyController(
@@ -96,6 +106,8 @@ class MultiAgentOrchestrator:
         kb_evidence: list[dict[str, Any]],
         n_rounds: int = 2,
         vision_result: dict[str, Any] | None = None,
+        mechanism_tags: dict[str, Any] | None = None,
+        source_routing: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         final_result: dict[str, Any] | None = None
         for event in self.run_iter(
@@ -104,6 +116,8 @@ class MultiAgentOrchestrator:
             kb_evidence=kb_evidence,
             n_rounds=n_rounds,
             vision_result=vision_result,
+            mechanism_tags=mechanism_tags,
+            source_routing=source_routing,
         ):
             if event.get("type") == "orchestrator_complete":
                 final_result = event.get("result")
@@ -118,10 +132,16 @@ class MultiAgentOrchestrator:
         kb_evidence: list[dict[str, Any]],
         n_rounds: int = 2,
         vision_result: dict[str, Any] | None = None,
+        mechanism_tags: dict[str, Any] | None = None,
+        source_routing: dict[str, Any] | None = None,
     ):
         rounds: list[dict[str, Any]] = []
         round_summary_meta: list[dict[str, Any]] = []
-        shared_state = self._build_initial_shared_state(caption)
+        shared_state = self._build_initial_shared_state(
+            caption,
+            mechanism_tags=mechanism_tags or {},
+            source_routing=source_routing or {},
+        )
         fallback_used = False
 
         for round_idx in range(1, n_rounds + 1):
@@ -165,6 +185,7 @@ class MultiAgentOrchestrator:
                                 kb_evidence=kb_evidence,
                                 round_idx=round_idx,
                                 shared_state=shared_state,
+                                vision_result=vision_result,
                             ),
                         )
                     )
@@ -235,6 +256,8 @@ class MultiAgentOrchestrator:
                 summary=summary,
                 active_agents=active_agents,
                 expert_turns=expert_turns,
+                caption=caption,
+                vision_result=vision_result,
             )
             rounds.append(
                 {
@@ -329,6 +352,7 @@ class MultiAgentOrchestrator:
         )
         if prohibited_actions:
             final_result["prohibited_actions"] = prohibited_actions
+        final_result = self._apply_action_gate_to_final_result(final_result, shared_state)
 
         execution_meta = {
             "strict_real_output": self.strict_real_output,
@@ -391,32 +415,45 @@ class MultiAgentOrchestrator:
             rounds=rounds,
         )
         baseline_error: dict[str, Any] | None = None
-        try:
-            baseline_payload, baseline_meta = self._run_baseline_report(
-                case_text=case_text,
-                caption=caption,
-                kb_evidence=kb_evidence,
-                image_bytes=image_bytes,
-            )
-            baseline_markdown = str(baseline_payload.get("markdown_report", "")).strip()
-        except RealOutputRequiredError as err:
-            baseline_payload = {}
-            baseline_error = err.to_detail()
+        if not self.enable_baseline_report:
+            baseline_payload: dict[str, Any] = {}
+            baseline_markdown = ""
             baseline_meta = {
-                "provider": err.provider,
-                "model": err.model,
+                "provider": "",
+                "model": "",
                 "latency_ms": 0,
                 "request_id": "",
                 "is_real_output": False,
-                "used_fallback": True,
-                "error": baseline_error,
+                "used_fallback": False,
+                "baseline_disabled": True,
             }
-            baseline_markdown = (
-                "# 单模型救治报告\n\n"
-                "当前基线对比模型暂不可用，因此未生成单模型对照报告。\n\n"
-                f"原因：{err.reason}\n\n"
-                "这不会影响多智能体主报告的生成和返回。"
-            )
+        else:
+            try:
+                baseline_payload, baseline_meta = self._run_baseline_report(
+                    case_text=case_text,
+                    caption=caption,
+                    kb_evidence=kb_evidence,
+                    image_bytes=image_bytes,
+                )
+                baseline_markdown = str(baseline_payload.get("markdown_report", "")).strip()
+            except RealOutputRequiredError as err:
+                baseline_payload = {}
+                baseline_error = err.to_detail()
+                baseline_meta = {
+                    "provider": err.provider,
+                    "model": err.model,
+                    "latency_ms": 0,
+                    "request_id": "",
+                    "is_real_output": False,
+                    "used_fallback": True,
+                    "error": baseline_error,
+                }
+                baseline_markdown = (
+                    "# 单模型救治报告\n\n"
+                    "当前基线对比模型暂不可用，因此未生成单模型对照报告。\n\n"
+                    f"原因：{err.reason}\n\n"
+                    "这不会影响多智能体主报告的生成和返回。"
+                )
         result = {
             "multi_agent_markdown": multi_markdown,
             "baseline_markdown": baseline_markdown,
@@ -424,12 +461,19 @@ class MultiAgentOrchestrator:
             "baseline_meta": baseline_meta,
             "baseline_structured": {k: v for k, v in baseline_payload.items() if k != "markdown_report"},
             "report_packet": report_packet,
+            "baseline_disabled": not self.enable_baseline_report,
         }
         if baseline_error is not None:
             result["baseline_error"] = baseline_error
         return result
 
-    def _build_initial_shared_state(self, caption: CaptionSchema) -> dict[str, Any]:
+    def _build_initial_shared_state(
+        self,
+        caption: CaptionSchema,
+        *,
+        mechanism_tags: dict[str, Any] | None = None,
+        source_routing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         followup = self._unique_strings(caption.followup_questions)
         co_signs = self._enum_values(caption.symptoms.co_signs)
         recommended_experts: list[str] = []
@@ -439,7 +483,7 @@ class MultiAgentOrchestrator:
             recommended_experts.append("cultivation_management_officer")
 
         uncertainty = (1.0 - float(caption.confidence)) * 0.65 + float(caption.ood_score) * 0.35
-        return {
+        state = {
             "consensus": [],
             "conflicts": [],
             "unique_points": [],
@@ -459,7 +503,33 @@ class MultiAgentOrchestrator:
             "uncertainty_triggers": followup[:3],
             "report_priority": self._initial_report_priority(caption),
             "evidence_sufficiency": "",
+            "diagnosis_board": {},
+            "evidence_board": {
+                "missing_evidence": followup[:5],
+                "verification_value": followup[:5],
+            },
+            "action_board": {},
+            "risk_board": {},
+            "diagnosis_evidence": [],
+            "mechanism_tags": mechanism_tags or {},
+            "source_routing": source_routing or {},
+            "source_agreement": self._unique_strings((source_routing or {}).get("source_agreement", [])),
+            "source_conflicts": self._unique_strings((source_routing or {}).get("source_conflicts", [])),
+            "mechanism_hypotheses": self._unique_strings((source_routing or {}).get("mechanism_hypotheses", [])),
+            "action_gate": "balanced",
         }
+        state.update(
+            self._compute_protocol_state(
+                caption=caption,
+                expert_turns=[],
+                conflicts=state["conflicts"],
+                evidence_gaps=state["evidence_gaps"],
+                source_agreement=state["source_agreement"],
+                source_conflicts=state["source_conflicts"],
+                mechanism_tags=state["mechanism_tags"],
+            )
+        )
+        return state
 
     def _select_experts(
         self,
@@ -553,6 +623,7 @@ class MultiAgentOrchestrator:
         kb_evidence: list[dict[str, Any]],
         round_idx: int,
         shared_state: dict[str, Any],
+        vision_result: dict[str, Any] | None = None,
     ):
         return lambda: self._run_single_expert(
             expert=expert,
@@ -561,6 +632,7 @@ class MultiAgentOrchestrator:
             kb_evidence=kb_evidence,
             round_idx=round_idx,
             shared_state=shared_state,
+            vision_result=vision_result,
         )
 
     def _merge_shared_state(
@@ -569,6 +641,8 @@ class MultiAgentOrchestrator:
         summary: dict[str, Any],
         active_agents: list[str],
         expert_turns: list[dict[str, Any]],
+        caption: CaptionSchema,
+        vision_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         valid_agents = set(self.expert_lookup)
         proposed_actions = self._unique_strings(
@@ -581,6 +655,14 @@ class MultiAgentOrchestrator:
         working_diagnoses = self._unique_strings(summary.get("working_diagnoses", []))
         if not working_diagnoses:
             working_diagnoses = self._derive_working_diagnoses(expert_turns)
+        if not working_diagnoses:
+            vn = self._vision_primary_cn(vision_result)
+            if vn and vn not in {"未知", ""}:
+                working_diagnoses = [vn]
+        elif working_diagnoses and all(self._is_placeholder_diagnosis_label(x) for x in working_diagnoses):
+            vn = self._vision_primary_cn(vision_result)
+            if vn and vn not in {"未知", ""}:
+                working_diagnoses = [vn]
         open_questions = self._unique_strings(summary.get("open_questions", []))
         if not open_questions:
             open_questions = self._derive_open_questions(expert_turns)
@@ -605,6 +687,36 @@ class MultiAgentOrchestrator:
         report_priority = self._unique_strings(summary.get("report_priority", []))
         if not report_priority:
             report_priority = self._unique_strings(previous_state.get("report_priority", []) + next_focus)
+        diagnosis_board = summary.get("diagnosis_board", {})
+        if not isinstance(diagnosis_board, dict):
+            diagnosis_board = {}
+        evidence_gap_board = summary.get("evidence_board", {})
+        if not isinstance(evidence_gap_board, dict):
+            evidence_gap_board = {
+                "missing_evidence": evidence_gaps[:],
+                "verification_value": verification_tasks[:],
+            }
+        action_board = summary.get("action_board", {})
+        if not isinstance(action_board, dict):
+            action_board = {}
+        risk_board = summary.get("risk_board", {})
+        if not isinstance(risk_board, dict):
+            risk_board = {}
+        diagnosis_evidence = summary.get("diagnosis_evidence", [])
+        if not isinstance(diagnosis_evidence, list) or not diagnosis_evidence:
+            diagnosis_evidence = self._derive_evidence_board(expert_turns)
+        source_agreement = self._unique_strings(previous_state.get("source_agreement", []) + summary.get("source_agreement", []))
+        source_conflicts = self._unique_strings(previous_state.get("source_conflicts", []) + summary.get("source_conflicts", []))
+        mechanism_hypotheses = self._unique_strings(previous_state.get("mechanism_hypotheses", []) + summary.get("mechanism_hypotheses", []))
+        protocol_state = self._compute_protocol_state(
+            caption=caption,
+            expert_turns=expert_turns,
+            conflicts=self._unique_strings(summary.get("conflicts", [])),
+            evidence_gaps=evidence_gaps,
+            source_agreement=source_agreement,
+            source_conflicts=source_conflicts,
+            mechanism_tags=previous_state.get("mechanism_tags", {}),
+        )
 
         return {
             "consensus": self._unique_strings(summary.get("consensus", [])),
@@ -624,12 +736,22 @@ class MultiAgentOrchestrator:
             "stop_signal": bool(summary.get("stop_signal", False)),
             "active_agents": active_agents,
             "proposed_actions": proposed_actions,
-            "evidence_board": evidence_board,
+            "evidence_board": evidence_gap_board,
+            "diagnosis_board": diagnosis_board,
+            "action_board": action_board,
+            "risk_board": risk_board,
+            "diagnosis_evidence": diagnosis_evidence,
             "action_focus": action_focus,
             "verification_tasks": verification_tasks,
             "uncertainty_triggers": uncertainty_triggers,
             "report_priority": report_priority,
             "evidence_sufficiency": str(previous_state.get("evidence_sufficiency", "")).strip(),
+            "mechanism_tags": previous_state.get("mechanism_tags", {}),
+            "source_routing": previous_state.get("source_routing", {}),
+            "source_agreement": source_agreement,
+            "source_conflicts": source_conflicts,
+            "mechanism_hypotheses": mechanism_hypotheses,
+            **protocol_state,
         }
 
     def _should_stop(self, round_idx: int, max_rounds: int, shared_state: dict[str, Any]) -> bool:
@@ -639,9 +761,13 @@ class MultiAgentOrchestrator:
         conflicts = shared_state.get("conflicts", [])
         open_questions = shared_state.get("open_questions", [])
         stop_signal = bool(shared_state.get("stop_signal", False))
-        if stop_signal and uncertainty <= 0.35 and not conflicts:
+        quorum_score = float(shared_state.get("quorum_score", 0.0) or 0.0)
+        inhibition_score = float(shared_state.get("inhibition_score", 0.0) or 0.0)
+        if inhibition_score >= self.inhibition_block_threshold:
+            return False
+        if stop_signal and quorum_score >= self.quorum_stop_threshold and uncertainty <= 0.35 and not conflicts:
             return True
-        if uncertainty <= 0.2 and not conflicts and len(open_questions) <= 1:
+        if quorum_score >= self.quorum_stop_threshold and inhibition_score <= self.inhibition_block_threshold * 0.75 and uncertainty <= 0.2 and not conflicts and len(open_questions) <= 1:
             return True
         return False
 
@@ -653,6 +779,7 @@ class MultiAgentOrchestrator:
         kb_evidence: list[dict[str, Any]],
         round_idx: int,
         shared_state: dict[str, Any],
+        vision_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stage = f"expert_round_{round_idx}"
         agent_name = expert["agent_name"]
@@ -701,6 +828,7 @@ class MultiAgentOrchestrator:
         payload["agent_name"] = agent_name
         payload["meta"] = call_meta
         payload = sanitize_expert_turn(payload)
+        payload = self._repair_invalid_diagnosis_names_in_turn(payload, vision_result)
         payload["citations"] = self._filter_fallback_citations(payload.get("citations", []))
         self._assert_turn_is_real(payload, stage=stage, agent_name=agent_name)
         return payload
@@ -770,7 +898,7 @@ class MultiAgentOrchestrator:
                             "why_not_primary": f"{conflict_hint}，仍需补证后再稳定排序。",
                         }
                     ],
-                    "why_primary": [f"当前可操作证据更集中在“{primary_name}”方向。"],
+                    "why_primary": [f"当前可操作证据更集中在「{primary_name}」方向。"],
                     "why_not_primary": [conflict_hint],
                     "decisive_missing_evidence": [evidence_gap, open_question],
                     "citations": [],
@@ -789,7 +917,7 @@ class MultiAgentOrchestrator:
                     "agent_name": agent_name,
                     "role": role,
                     "today_actions": [first_action],
-                    "control_options": [f"围绕“{primary_name}”按先控险后升级的路径处理。"],
+                    "control_options": [f"围绕「{primary_name}」按先控险后升级的路径处理。"],
                     "observe_48h": [open_question],
                     "escalation_triggers": ["若 24 到 48 小时内病斑持续外扩或新增病斑，应立即升级处理并考虑送检。"],
                     "key_evidence_gaps": [evidence_gap],
@@ -868,13 +996,14 @@ class MultiAgentOrchestrator:
             shared_state=shared_state,
         )
         try:
-            return self._llm_structured_with_retry(
+            payload, meta = self._llm_structured_with_retry(
                 model_cls=CoordinatorSummarySchema,
                 messages=messages,
                 route_key="coordinator_round_summary",
                 stage=f"round_summary_{round_idx}",
                 agent_name="coordinator_round_summary",
             )
+            return sanitize_summary(payload), meta
         except RealOutputRequiredError:
             payload = self._build_deterministic_round_summary(
                 expert_turns=expert_turns,
@@ -888,7 +1017,7 @@ class MultiAgentOrchestrator:
                 is_real_output=True,
                 used_fallback=True,
             ).model_dump(mode="json")
-            return payload, meta
+            return sanitize_summary(payload), meta
 
     def _run_final(
         self,
@@ -933,6 +1062,7 @@ class MultiAgentOrchestrator:
             ).model_dump(mode="json")
         payload["citations"] = self._filter_fallback_citations(payload.get("citations", []))
         self._assert_final_is_real(payload, stage="final_diagnosis")
+        payload = self._apply_action_gate_to_final_result(payload, shared_state)
         return payload, call_meta, decision_packet
 
     def _run_safety(self, final_result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1201,56 +1331,65 @@ class MultiAgentOrchestrator:
                 "不要把同一冲突解释在多个章节里重复展开。",
                 "不要把动作建议写成模板口号。",
                 "不要把多个短句直接用顿号硬拼成一长句。",
-                "不要输出“需要复核”这类空泛句而不说明卡点与补证价值。",
+                "不要输出「需要复核」这类空泛句而不说明卡点与补证价值。",
                 "成品中禁止使用全角【】标签式小标题；勿用支持链、模型倾向、鉴别要点等后台词。",
             ],
         }
 
-        if section_title == "病例摘要":
+        if section_title == "基本信息":
             section_packet["section_goal"] = (
-                "只写画面上可见的病斑与分布细节，以及单张图能说到哪一步；严重度与是否立即处理留给后文专节，本节避免写成决策总览。"
+                "仅用表格列出：作物、疑似病名、病原/类别、图像分类倾向、田间确诊把握（可与分类倾向不一致）、阶段与部位等。"
+                "表格后最多一两句，不写长篇鉴别。"
             )
             section_packet["focus_suggestions"] = [
-                "三到六句为主；证据上限一句带过即可。",
+                "表头与分隔行、数据行分行；禁止表格与长段粘在一段里。",
+                "「分类相似度」与「确诊把握」分两行写清，避免读者把 100% 分类分当成确诊。",
             ]
             return section_packet
 
-        if section_title == "诊断判断与置信说明":
+        if section_title == "症状观察":
             section_packet["section_goal"] = (
-                "解释这种病田间常怎么看、当前为何更像首位方向、还要和哪些病区分；救治动作留给救治专节，本节不写成操作清单。"
+                "列出所有肉眼可见的症状事实，每条一个观察点。只写看到的现象，不下诊断结论。"
             )
             section_packet["focus_suggestions"] = [
-                "有百分数时写成「照片分类更靠近哪类」，同段点明不等于病理确诊。",
-                "用 **加粗短语** 分块即可，块名用中性简题（如「这种病一般啥样」「为何更像 A」），不要用支持链/鉴别要点等词。",
-                "至少两条「若…则…」绑定观察与判断。",
-                "避免照搬 JSON 键名；无知识库摘录时勿编造。",
+                "用短条目格式，描述颜色、形态、分布、质感等客观特征。",
             ]
             return section_packet
 
-        if section_title == "复查与补证建议":
-            section_packet["section_goal"] = "写清怎么补拍、补什么、补到之后能分清啥；与救治节已写的动作勿整段重复。"
-            section_packet["focus_suggestions"] = [
-                "每条尽量「若看到/拍到 A → 下一步 B 或判断更明朗」。",
-                "鼓励按补证类型分条（叶背、整株、环境等），便于农户执行。",
-            ]
-            section_packet["anti_patterns"] = section_packet["anti_patterns"] + [
-                "不要整节只堆「尚缺」「不足」而不写具体怎么做。",
-            ]
-            return section_packet
-
-        if section_title == "救治建议与实施路径":
+        if section_title == "鉴别诊断":
             section_packet["section_goal"] = (
-                "与病例摘要、诊断节勿重复开篇总述；本节按今天 / 24 小时内 / 观察期展开可执行步骤；多写「若…则…」。"
+                "用表格列出候选病害、可能性百分比和依据。按可能性从高到低排列。"
             )
             section_packet["focus_suggestions"] = [
-                "动词开头、短句；不写具体药剂配方。",
+                "表格列：病害、可能性、依据。依据结合视觉证据和知识库信息。",
             ]
             return section_packet
 
-        if section_title == "风险边界、预后与复查":
-            section_packet["section_goal"] = "禁忌、预后读数、何时维持或加码；与救治节的若则阈值呼应，勿整段复读。"
+        if section_title == "防治建议":
+            section_packet["section_goal"] = (
+                "分为立即核查、药剂防治、农业防治等子节。药剂防治用表格，农业防治用条目。"
+            )
             section_packet["focus_suggestions"] = [
-                "用「若…则…」对照写升级/维持。",
+                "先写核查动作，再写药剂表格，最后写农业管理措施。",
+                "证据不足时写类别级建议并注明需本地复核。",
+            ]
+            return section_packet
+
+        if section_title == "预后评估":
+            section_packet["section_goal"] = (
+                "用表格评估预后指标：可治愈性、已受损部位恢复情况、周边风险、产量影响等。"
+            )
+            section_packet["focus_suggestions"] = [
+                "表格形式为主。",
+            ]
+            return section_packet
+
+        if section_title == "备注":
+            section_packet["section_goal"] = (
+                "用引用块或极短段落收束：证据边界、补证优先级、是否需线下植保复核；不复述前文表格。"
+            )
+            section_packet["focus_suggestions"] = [
+                "可写成以 > 开头的引用块。",
             ]
             return section_packet
 
@@ -1283,7 +1422,7 @@ class MultiAgentOrchestrator:
 
     @staticmethod
     def _compose_report_markdown(completed_sections: list[dict[str, str]]) -> str:
-        blocks = ["# 农业救治报告"]
+        blocks = ["# 番茄叶片病害诊断报告"]
         for item in completed_sections:
             title = str(item.get("title", "")).strip()
             markdown = str(item.get("markdown", "")).strip()
@@ -1293,7 +1432,12 @@ class MultiAgentOrchestrator:
         return "\n\n".join(blocks).strip()
 
     def _polish_report_text(self, text: Any) -> str:
-        value = " ".join(str(text or "").split())
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        # Preserve line structure: normalize spaces within each line but keep newlines
+        lines = [" ".join(line.split()) for line in raw.split("\n")]
+        value = "\n".join(lines).strip()
         if not value:
             return ""
         value = value.replace("。。", "。").replace("，。", "。").replace("；。", "。").replace("：。", "：")
@@ -1301,7 +1445,8 @@ class MultiAgentOrchestrator:
         value = value.replace("。。", "。").replace("，，", "，").replace("；；", "；")
         value = re.sub(r"([。！？；，])\1+", r"\1", value)
         value = re.sub(r"([。！？；，：])(?=[。！？；，：])", "", value)
-        value = re.sub(r"\s*([。！？；，：])\s*", r"\1", value)
+        # Only remove spaces (not newlines) around punctuation
+        value = re.sub(r" *([。！？；，：]) *", r"\1", value)
         return value.strip()
 
     @staticmethod
@@ -1399,17 +1544,7 @@ class MultiAgentOrchestrator:
         if not raw_md:
             raw_md = self._compose_section_markdown(title=title, payload=payload)
         repaired = {"section_title": title, "section_markdown": raw_md}
-        if title == "病例摘要":
-            report_context = report_packet.get("report_context", {}) if isinstance(report_packet, dict) else {}
-            final_diagnosis = report_packet.get("final_diagnosis", {}) if isinstance(report_packet, dict) else {}
-            blocked_terms = self._unique_strings(
-                [report_context.get("primary_diagnosis"), report_context.get("secondary_differential"), final_diagnosis.get("name")]
-                + list(report_context.get("differential_names", []))
-            )
-            repaired["section_markdown"] = self._sanitize_summary_observation_text(
-                repaired.get("section_markdown", ""),
-                blocked_terms=blocked_terms,
-            )
+        # 基本信息章节为表格形式，不需要特殊文本净化
         text = str(repaired.get("section_markdown", "")).strip()
         if len(text) < 80:
             return self._build_emergency_section_payload(title=title, report_packet=report_packet)
@@ -1540,14 +1675,14 @@ class MultiAgentOrchestrator:
             fallback="现有证据仍以图像与上下文为主，需结合复查继续校正。",
         )
 
-        if title == "病例摘要":
+        if title == "基本信息":
             md = (
                 "本节只归纳当前图像能直接支撑的事实：叶片可见的病斑形态、颜色与组织变化、分布位置以及模型给出的受害范围估计。"
                 "这些材料用于描述「现场看到了什么」，并不等同于已完成病名确诊。\n\n"
                 "在单张图像条件下，结论强度天然受限；后续章节会在补证前提下讨论排序与处置。"
                 "读者应把本节理解为观察起点，而非治疗决策终点。"
             )
-        elif title == "诊断判断与置信说明":
+        elif title == "症状观察":
             differential_hint = (
                 f"主要鉴别对象包括：{'、'.join(differential_names)}。"
                 if differential_names
@@ -1560,13 +1695,13 @@ class MultiAgentOrchestrator:
                 f"对「{secondary}」若关键区分特征未出现，可解释其暂未压过首位。"
                 f"证据边界：{evidence_sufficiency} 若出现分类百分数，只表示「更像哪一类」，不能当作确诊概率。"
             )
-        elif title == "复查与补证建议":
+        elif title == "鉴别诊断":
             md = (
                 "优先安排可复核动作：叶背近景、整株分布、同叶位时间序列，通常最能帮助区分相似选项。\n\n"
                 "把每项补证写成「若观察到某结果，判断可如何前移或回调」，避免只罗列「尚缺」而不给路径。"
                 "必要时再考虑镜检或送检，并与田间记录对齐。"
             )
-        elif title == "救治建议与实施路径":
+        elif title == "防治建议":
             md = (
                 "在证据尚未完全闭合前，实施路径应坚持先控险、后升级：先把扩散风险和环境因素压住，再讨论针对性更强的干预。"
                 "田间层面可优先完成分区观察、改善通风与叶面干湿节律，并把重症叶片与健康群体在记录上分开。\n\n"
@@ -1575,10 +1710,13 @@ class MultiAgentOrchestrator:
             )
         else:
             md = (
-                "风险管理的首要是避免在证据不足时采取不可逆或高代价动作；其次是为复查留出清晰的时间节点与判断指标。"
-                "短期内应持续记录病斑是否扩展、是否出现整株层面的同步受害，以及环境条件是否持续利于病情发展。\n\n"
-                "若信号走强，需同步提高处置与复核强度；若趋势趋稳且关键阴性证据累积，则应避免过度治疗。"
-                "任何调整都建议以可复核的观察记录为依据，而不是单次主观印象。"
+                "| 指标 | 评估 |\n"
+                "|------|------|\n"
+                "| 可治愈性 | 待进一步确认病因后评估 |\n"
+                "| 已受损叶片 | 已受损部分一般无法恢复 |\n"
+                "| 周边植株风险 | 需检查邻近植株 |\n"
+                "| 产量影响 | 取决于病情发展速度和防治时机 |\n\n"
+                "> 建议持续观察记录，以可复核的田间数据为依据调整处置强度。"
             )
         return {
             "section_title": title,
@@ -1606,9 +1744,11 @@ class MultiAgentOrchestrator:
                 "role": "system",
                 "content": (
                     "你是农业病害救治报告的章节修订助手，只输出中文正文。\n"
+                    f"{MODEL_CAPABILITY_PREAMBLE}\n"
                     "文风客观、书面、克制；避免鸡汤句与通篇「你」；每段宜短，段间空行。\n"
                     "禁止 JSON、禁止 ## 标题、禁止代码围栏；禁止【】标签式小标题；允许加粗短语与短列表。\n"
-                    "各节勿重复同一开篇总述；诊断节须写清「这种病是什么」，不得只写病名。"
+                    "各节勿重复同一开篇总述；诊断节须写清「这种病是什么」，不得只写病名；"
+                    "修订时勿新增材料中未出现的具体药剂配方。"
                 ),
             },
             {
@@ -1724,12 +1864,10 @@ class MultiAgentOrchestrator:
             try:
                 validate_markdown_report(rewritten)
             except ValueError:
-                # 放宽策略：优先保留语义自然的改写稿，避免机械回退到模板报告。
                 return rewritten, True
             return rewritten, True
         except Exception as err:  # noqa: BLE001
             issues.append(str(err))
-        # 最后兜底优先保留当前可读文本，减少模板化重复。
         return markdown, True
 
     def _rewrite_markdown_report(
@@ -1748,15 +1886,17 @@ class MultiAgentOrchestrator:
             {
                 "role": "system",
                 "content": (
-                    "你是农业病害救治报告润色助手。"
-                    "你的任务不是重新诊断，而是把已有报告重写成更像正式报告的中文 Markdown。"
+                    "你是农业病害救治报告润色助手。\n"
+                    f"{MODEL_CAPABILITY_PREAMBLE}\n"
+                    "你的任务不是重新诊断，而是把已有报告重写成更像正式报告的中文 Markdown；"
+                    "不得为「显得更专业」而补充当前 markdown / 材料中未出现的登记药剂细节。"
                     "只输出 JSON，且只包含 markdown_report 一个字段。"
-                    "报告需要保留五个固定章节，并保持章节顺序不变。"
+                    "报告需要保留六个固定章节，并保持章节顺序不变。"
                     "每个章节优先使用自然段叙述，不要把正文写成清单。"
                     "允许少量项目符号，但不要让报告看起来像要点堆砌。"
                     "不要在多个章节里原样重复同一段冲突说明或同一段证据解释。"
                     "不要输出内部 id、模型名、provider、stage、source 标记、路径或调试信息。"
-                    "当存在证据冲突时，使用“倾向于”“目前怀疑”“需进一步确认”等审慎措辞。"
+                    "当存在证据冲突时，使用「倾向于」「目前怀疑」「需进一步确认」等审慎措辞。"
                 ),
             },
             {
@@ -1912,68 +2052,74 @@ class MultiAgentOrchestrator:
                 f"{f'；分割估计病损约占叶片面积 {damage_ratio}' if damage_ratio else ''}。"
             )
 
+        primary = diagnosis_name
+        secondary = self._first_non_empty(report_context.get("secondary_differential"), fallback="")
+
         sections = [
             (
-                "病例摘要",
+                "基本信息",
                 (
-                    f"本例为{crop}叶片材料。当前可见线索可概括为：{observed_symptoms}；"
-                    f"{visual_summary or '图像可见明显叶部受害征象。'}"
-                    f"{f' {consistency_note}' if consistency_note else ''}\n\n"
-                    f"{f'{area_ratio_source_note} ' if area_ratio_source_note else ''}"
-                    f"{f'{stage_hint} ' if stage_hint else ''}"
-                    f"{conflict_sentence or '单张图像仅能支撑阶段性描述，排序与处置见后文。'}"
+                    f"| 项目 | 内容 |\n"
+                    f"|------|------|\n"
+                    f"| 作物 | {crop} |\n"
+                    f"| 诊断病害 | {primary}（疑似） |\n"
+                    f"| 置信层级 | {confidence_label} |\n"
+                    f"| 病害阶段 | {stage_hint or '待确认'} |\n"
+                    f"| 证据状态 | {evidence_sufficiency} |"
                 ),
             ),
             (
-                "诊断判断与置信说明",
+                "症状观察",
                 (
-                    f"{diagnosis_statement} 置信层级记为「{confidence_label}」。{model_score_note}"
-                    f"{confidence_statement}\n\n"
-                    f"{primary_reasoning + ' ' if primary_reasoning else ''}"
-                    f"证据强度评估：{evidence_sufficiency}。"
-                    f"{f' 分歧点：整体印象接近「{conflict_overall}」，局部线索更接近「{conflict_local}」。' if (conflict_overall and conflict_local and conflict_overall != conflict_local) else ''}"
-                    f"{f' {reason_summary}' if reason_summary else ''}\n\n"
-                    f"{f'{image_specific_basis} ' if image_specific_basis else ''}"
-                    f"支持信息主要来自{symptom_summary}与{visual_evidence}；"
-                    f"限制面包括{counter_evidence}。"
-                    f"鉴别上需盯住{differential_points}。{differential_summary}"
-                    f"{f' 视觉层面补充：{reason_details}。' if reason_details else ''}"
-                    f"{f' 高影响分歧点：{uncertainty_discriminators}。' if uncertainty_discriminators else ''}"
+                    f"- {visual_summary or '叶片可见明显受害征象'}\n"
+                    f"- 可见症状特征：{observed_symptoms}\n"
+                    f"{f'- {area_ratio_source_note}' if area_ratio_source_note else ''}"
+                    f"{f'\n- {consistency_note}' if consistency_note else ''}"
                 ),
             ),
             (
-                "复查与补证建议",
+                "鉴别诊断",
                 (
-                    f"建议优先安排：{evidence_to_collect}。"
-                    f"{f' 对排序帮助较大的是：{uncertainty_discriminators}。' if uncertainty_discriminators else ''}\n\n"
-                    f"{f'补证回报后可参考：{uncertainty_rank_shift}。' if uncertainty_rank_shift else ''}"
-                    f"{f' {recommended_interpretation}' if recommended_interpretation else ''}"
-                    " 将复拍、叶背观察与必要送检写成可记录动作，便于后续对照。"
+                    f"| 病害 | 可能性 | 依据 |\n"
+                    f"|------|--------|------|\n"
+                    f"| {primary} | {confidence_label} | {primary_reasoning or '图像分类倾向'} |\n"
+                    f"{f'| {secondary} | 待评估 | {differential_points or '需补充更多证据区分'} |' if secondary else ''}"
+                    f"\n\n{model_score_note}"
                 ),
             ),
             (
-                "救治建议与实施路径",
+                "防治建议",
                 (
-                    f"先执行低风险步骤：{actions}；同时记录现场变化。"
-                    f"{f' 分阶段安排可参考：{timeline_summary or rescue_plan}。' if (timeline_summary or rescue_plan) else ''}\n\n"
-                    f"观察重点：{monitoring_plan}。"
-                    f"{f' 若出现{escalation_conditions}，应提高处理与复核强度。' if escalation_conditions else ''}"
-                    f"{f' 阈值提示：{upgrade_thresholds} 倾向升级；{downgrade_thresholds} 可考虑下调。' if (upgrade_thresholds or downgrade_thresholds) else ''}"
-                    " 具体药剂须在病因更明确后由专业人员确定。"
+                    f"### 立即核查\n"
+                    f"1. 检查叶背特征\n"
+                    f"2. 检查整株及邻近植株\n\n"
+                    f"### 当前措施\n"
+                    f"{actions}\n\n"
+                    f"### 观察重点\n"
+                    f"{monitoring_plan}\n\n"
+                    f"{f'> 升级条件：{escalation_conditions}' if escalation_conditions else ''}"
                 ),
             ),
             (
-                "风险边界、预后与复查",
+                "预后评估",
                 (
-                    f"主要风险：{safety_notes}；暂避免：{prohibited_actions}。"
-                    f"{f' {prognosis_note}' if prognosis_note else ''}\n\n"
-                    f"复查：{required_followups}。{review_summary}"
-                    f"{f' 建议节点：{review_nodes}。' if review_nodes else ''}"
-                    f"{f' 复查后分支：{post_review_branches}。' if post_review_branches else ''}"
+                    f"| 指标 | 评估 |\n"
+                    f"|------|------|\n"
+                    f"| 风险 | {safety_notes} |\n"
+                    f"| 禁忌 | {prohibited_actions} |\n"
+                    f"| 复查 | {required_followups} |\n"
+                    f"{f'| 预后 | {prognosis_note} |' if prognosis_note else ''}"
+                ),
+            ),
+            (
+                "备注",
+                (
+                    f"> 证据边界：{evidence_sufficiency}。"
+                    f" 建议按前文核查与观察节点执行，关键不确定点需田间补证或当地植保复核。"
                 ),
             ),
         ]
-        blocks = ["# 农业救治报告"]
+        blocks = ["# 番茄叶片病害诊断报告"]
         for title, body in sections:
             blocks.append(f"## {title}\n{self._polish_report_text(body)}")
         return "\n\n".join(blocks).strip()
@@ -2021,7 +2167,7 @@ class MultiAgentOrchestrator:
             why_not_primary = self._first_non_empty(item.get("why_not_primary"))
             if not name:
                 continue
-            sentence = f"需继续鉴别“{name}”"
+            sentence = f"需继续鉴别「{name}」"
             if why_supported:
                 sentence += f"，其保留原因主要是{why_supported}"
             if why_not_primary:
@@ -2191,13 +2337,16 @@ class MultiAgentOrchestrator:
 
     @staticmethod
     def _first_non_empty(values: Any, *, fallback: str = "") -> str:
+        bad = {"[]", "[ ]", "{}", "null", "none", "undefined", "unknown"}
         if isinstance(values, list):
             for item in values:
                 text = str(item).strip()
-                if text:
+                if text and text.lower() not in bad and text not in bad:
                     return text
         text = str(values).strip() if values is not None else ""
-        return text or fallback
+        if text and text.lower() not in bad and text not in bad:
+            return text
+        return fallback
 
     @staticmethod
     def _confidence_label_from_uncertainty(uncertainty_score: float) -> str:
@@ -2284,10 +2433,10 @@ class MultiAgentOrchestrator:
         has_conflict: bool,
     ) -> str:
         if has_conflict or uncertainty_score >= 0.7:
-            return f"当前更倾向于“{primary_name}”，但证据冲突较明显，结论仅适合作为待复核的倾向性诊断。"
+            return f"当前更倾向于「{primary_name}」，但证据冲突较明显，结论仅适合作为待复核的倾向性诊断。"
         if uncertainty_score >= 0.4:
-            return f"当前初步倾向于“{primary_name}”，但仍需补充关键图像或检验信息后再提高结论强度。"
-        return f"当前证据对“{primary_name}”有较稳定支持，但仍建议结合后续复查结果综合判断。"
+            return f"当前初步倾向于「{primary_name}」，但仍需补充关键图像或检验信息后再提高结论强度。"
+        return f"当前证据对「{primary_name}」有较稳定支持，但仍建议结合后续复查结果综合判断。"
 
     @staticmethod
     def _sanitize_model_payload(model_cls: Type[BaseModel], payload: Any) -> Any:
@@ -2552,6 +2701,203 @@ class MultiAgentOrchestrator:
     def _clamp(value: float) -> float:
         return max(0.0, min(1.0, float(value)))
 
+    def _compute_protocol_state(
+        self,
+        *,
+        caption: CaptionSchema,
+        expert_turns: list[dict[str, Any]],
+        conflicts: list[str],
+        evidence_gaps: list[str],
+        source_agreement: list[str],
+        source_conflicts: list[str],
+        mechanism_tags: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        agent_consensus = self._derive_agent_consensus(expert_turns)
+        conflict_load = self._clamp(len(self._unique_strings(conflicts)) * 0.22)
+        gap_load = self._clamp(len(self._unique_strings(evidence_gaps)) * 0.12)
+        source_alignment = self._clamp(
+            0.46
+            + min(0.24, len(self._unique_strings(source_agreement)) * 0.08)
+            - min(0.34, len(self._unique_strings(source_conflicts)) * 0.11)
+        )
+        visual_reliability = self._clamp(float(caption.confidence) * (1.0 - float(caption.ood_score)))
+        if not expert_turns:
+            agent_consensus = self._clamp(0.35 + visual_reliability * 0.4 - gap_load * 0.15)
+
+        quorum_score = self._clamp(
+            agent_consensus * 0.42
+            + source_alignment * 0.24
+            + visual_reliability * 0.24
+            + (1.0 - conflict_load) * 0.10
+        )
+        inhibition_score = self._clamp(
+            conflict_load * 0.34
+            + self._clamp(len(self._unique_strings(source_conflicts)) * 0.18) * 0.26
+            + float(caption.ood_score) * 0.22
+            + gap_load * 0.18
+        )
+        mechanism_missing = self._mechanism_signal_missing(mechanism_tags)
+        action_gate = (
+            "conservative"
+            if inhibition_score >= self.inhibition_block_threshold
+            or mechanism_missing
+            or gap_load >= 0.45
+            else "balanced"
+        )
+        stop_signal = bool(
+            quorum_score >= self.quorum_stop_threshold
+            and inhibition_score < self.inhibition_block_threshold
+            and not self._unique_strings(conflicts)
+            and len(self._unique_strings(evidence_gaps)) <= 1
+        )
+        return {
+            "quorum_score": quorum_score,
+            "inhibition_score": inhibition_score,
+            "stop_signal": stop_signal,
+            "action_gate": action_gate,
+        }
+
+    def _derive_agent_consensus(self, expert_turns: list[dict[str, Any]]) -> float:
+        if not expert_turns:
+            return 0.0
+        votes: dict[str, int] = {}
+        confidence_sum = 0.0
+        counted_turns = 0
+        for turn in expert_turns:
+            names: list[str] = []
+            for field in ("top_k_causes", "candidate_causes", "ranked_differentials"):
+                for item in turn.get(field, [])[:2]:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name", "")).strip()
+                    if name and name.lower() != "unknown" and name not in names:
+                        names.append(name)
+            if names:
+                votes[names[0]] = votes.get(names[0], 0) + 1
+                counted_turns += 1
+            try:
+                confidence_sum += float(turn.get("confidence", 0.5) or 0.5)
+            except (TypeError, ValueError):
+                confidence_sum += 0.5
+        if counted_turns <= 0:
+            return self._clamp(confidence_sum / max(1, len(expert_turns)))
+        agreement_ratio = max(votes.values()) / counted_turns
+        avg_confidence = confidence_sum / max(1, len(expert_turns))
+        diversity_penalty = self._clamp((len(votes) - 1) * 0.12)
+        return self._clamp(agreement_ratio * 0.72 + avg_confidence * 0.28 - diversity_penalty)
+
+    def _mechanism_signal_missing(self, mechanism_tags: dict[str, Any] | None) -> bool:
+        if not isinstance(mechanism_tags, dict):
+            return True
+        host_context = mechanism_tags.get("host_context", {})
+        if not isinstance(host_context, dict):
+            return True
+        plant_part = str(host_context.get("plant_part", "")).strip()
+        stressor_class = {
+            str(item).strip()
+            for item in mechanism_tags.get("stressor_class", [])
+            if str(item).strip()
+        }
+        progression_hints = {
+            str(item).strip()
+            for item in mechanism_tags.get("progression_hints", [])
+            if str(item).strip()
+        }
+        return (
+            not plant_part
+            or plant_part == "unknown"
+            or not stressor_class
+            or stressor_class == {"unknown"}
+            or not progression_hints
+            or progression_hints == {"unknown"}
+        )
+
+    def _apply_action_gate_to_final_result(
+        self,
+        final_result: dict[str, Any],
+        shared_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if str(shared_state.get("action_gate", "balanced")).strip() != "conservative":
+            return final_result
+
+        filtered_actions = [
+            action
+            for action in final_result.get("actions", [])
+            if not self._is_aggressive_action(action)
+        ]
+        removed_actions = [
+            str(action).strip()
+            for action in final_result.get("actions", [])
+            if str(action).strip() and str(action).strip() not in filtered_actions
+        ]
+        conservative_actions = self._unique_strings(
+            list(shared_state.get("action_focus", []))
+            + list(shared_state.get("verification_tasks", []))
+            + list(shared_state.get("action_board", {}).get("low_risk_actions", []))
+            + list(shared_state.get("action_board", {}).get("environment_adjustments", []))
+            + [
+                "先隔离重症叶片并保持通风，避免立即升级高风险处置。",
+                "补拍叶背、同株多角度和近景图像后再复核。",
+                "24-48 小时观察病斑是否继续扩展，再决定是否升级处理。",
+            ]
+        )
+        final_result["actions"] = filtered_actions or conservative_actions[:4]
+        final_result["monitoring_plan"] = self._unique_strings(
+            final_result.get("monitoring_plan", [])
+            + conservative_actions[:3]
+        )[:5]
+        final_result["safety_notes"] = self._unique_strings(
+            final_result.get("safety_notes", [])
+            + ["当前 inhibition 较高或机制证据不足，动作门控已切换为 conservative。"]
+        )[:6]
+        final_result["prohibited_actions"] = self._unique_strings(
+            final_result.get("prohibited_actions", [])
+            + removed_actions
+            + ["在完成复拍、补证和复核前，不要直接执行高风险药剂或清园类动作。"]
+        )[:6]
+        rescue_plan = []
+        for item in final_result.get("rescue_plan", []):
+            if not isinstance(item, dict):
+                continue
+            plan_actions = [
+                action
+                for action in item.get("actions", [])
+                if not self._is_aggressive_action(action)
+            ]
+            rescue_plan.append(
+                {
+                    **item,
+                    "actions": self._unique_strings(plan_actions or conservative_actions[:3])[:4],
+                    "risk_level": "low",
+                }
+            )
+        if rescue_plan:
+            final_result["rescue_plan"] = rescue_plan
+        return final_result
+
+    @staticmethod
+    def _is_aggressive_action(action: Any) -> bool:
+        text = str(action).strip().lower()
+        if not text:
+            return False
+        aggressive_keywords = (
+            "立即喷",
+            "喷药",
+            "用药",
+            "灌根",
+            "高浓度",
+            "全面",
+            "大面积",
+            "销毁",
+            "清园",
+            "拔除",
+            "强杀",
+            "chemical",
+            "spray",
+            "destroy",
+        )
+        return any(keyword in text for keyword in aggressive_keywords)
+
     @staticmethod
     def _enum_values(values: list[Any]) -> list[str]:
         cleaned: list[str] = []
@@ -2562,12 +2908,85 @@ class MultiAgentOrchestrator:
                 cleaned.append(text)
         return cleaned
 
+    @staticmethod
+    def _is_placeholder_diagnosis_label(value: Any) -> bool:
+        """协调器/占位符输出的「待复核病害」等不得压住视觉主类。"""
+        t = str(value or "").strip()
+        if not t:
+            return True
+        if t in {"[]", "[ ]", "待复核病害", "unknown", "未知"}:
+            return True
+        if t.lower() == "unknown":
+            return True
+        return t.startswith("未映射类别")
+
+    @staticmethod
+    def _vision_primary_cn(vision_result: dict[str, Any] | None) -> str:
+        if not isinstance(vision_result, dict):
+            return ""
+        ia = vision_result.get("image_analysis")
+        if not isinstance(ia, dict):
+            return ""
+        pc = str(ia.get("predicted_class", "")).strip()
+        if not pc:
+            return ""
+        return class_name_to_cn(pc)
+
+    def _repair_invalid_diagnosis_names_in_turn(
+        self,
+        turn: dict[str, Any],
+        vision_result: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """将模型误输出的「[]」等占位病名替换为视觉分类中文病名。"""
+        vn = self._vision_primary_cn(vision_result)
+        if not vn or vn == "未知":
+            return turn
+        bad_substrings = ("未映射类别", "[]")
+
+        def _fix(name: str) -> str:
+            t = str(name).strip()
+            if not t or t in {"[]", "[ ]"} or t.lower() == "unknown":
+                return vn
+            if t == "待复核病害":
+                return vn
+            if any(s in t for s in bad_substrings):
+                return vn
+            return t
+
+        for key in ("candidate_causes", "top_k_causes"):
+            causes = turn.get(key)
+            if not isinstance(causes, list):
+                continue
+            for cause in causes:
+                if isinstance(cause, dict) and cause.get("name") is not None:
+                    cause["name"] = _fix(cause["name"])
+        ranked = turn.get("ranked_differentials")
+        if isinstance(ranked, list):
+            for item in ranked:
+                if isinstance(item, dict) and item.get("name") is not None:
+                    item["name"] = _fix(item["name"])
+        return turn
+
     def _derive_working_diagnoses(self, expert_turns: list[dict[str, Any]]) -> list[str]:
         diagnoses: list[str] = []
         for turn in expert_turns:
-            for cause in turn.get("top_k_causes", []):
+            for cause in turn.get("top_k_causes", []) + turn.get("candidate_causes", []):
+                if not isinstance(cause, dict):
+                    continue
                 name = str(cause.get("name", "")).strip()
-                if name and name.lower() != "unknown" and name not in diagnoses:
+                if (
+                    name
+                    and name.lower() != "unknown"
+                    and name not in {"[]", "[ ]", "待复核病害"}
+                    and not name.startswith("未映射类别")
+                    and name not in diagnoses
+                ):
+                    diagnoses.append(name)
+            for item in turn.get("ranked_differentials", []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name and name not in diagnoses and name not in {"[]", "[ ]"}:
                     diagnoses.append(name)
         return diagnoses[:5]
 
@@ -2587,10 +3006,17 @@ class MultiAgentOrchestrator:
             counter = self._unique_strings(turn.get("counter_evidence", []))
             missing = self._unique_strings(turn.get("questions_to_ask", []))
             sources = self._unique_strings(turn.get("citations", []))
-            for cause in turn.get("top_k_causes", []):
+            vf = self._unique_strings(turn.get("visible_findings", []))
+            nf = self._unique_strings(turn.get("negative_findings", []))
+            base_sup = supporting + vf
+            base_ctr = counter + nf
+
+            def _ingest_cause(cause: dict[str, Any], *, like_k: str, unlike_k: str) -> None:
                 name = str(cause.get("name", "")).strip()
-                if not name or name.lower() == "unknown":
-                    continue
+                if not name or name.lower() == "unknown" or name in {"[]", "[ ]"}:
+                    return
+                why_like = str(cause.get(like_k, "") or "")
+                why_unlike = str(cause.get(unlike_k, "") or "")
                 bucket = board.setdefault(
                     name,
                     {
@@ -2601,14 +3027,17 @@ class MultiAgentOrchestrator:
                         "sources": [],
                     },
                 )
-                bucket["supporting"] = self._unique_strings(
-                    bucket["supporting"] + supporting + [cause.get("why_like", "")]
-                )
-                bucket["counter"] = self._unique_strings(
-                    bucket["counter"] + counter + [cause.get("why_unlike", "")]
-                )
+                bucket["supporting"] = self._unique_strings(bucket["supporting"] + base_sup + [why_like])
+                bucket["counter"] = self._unique_strings(bucket["counter"] + base_ctr + [why_unlike])
                 bucket["missing"] = self._unique_strings(bucket["missing"] + missing)
                 bucket["sources"] = self._unique_strings(bucket["sources"] + sources)
+
+            for cause in turn.get("top_k_causes", []) + turn.get("candidate_causes", []):
+                if isinstance(cause, dict):
+                    _ingest_cause(cause, like_k="why_like", unlike_k="why_unlike")
+            for item in turn.get("ranked_differentials", []):
+                if isinstance(item, dict):
+                    _ingest_cause(item, like_k="why_supported", unlike_k="why_not_primary")
         return list(board.values())[:5]
 
     def _build_deterministic_round_summary(
@@ -2646,8 +3075,8 @@ class MultiAgentOrchestrator:
         report_priority = self._unique_strings(previous_state.get("report_priority", []))[:4]
         if not report_priority:
             report_priority = [
-                "先写病例摘要，再写诊断判断与置信说明（含支持与鉴别）。",
-                "随后写复查与补证建议，再写救治与风险边界。",
+                "先写基本信息，再写症状观察和鉴别诊断（含支持与鉴别）。",
+                "随后写防治建议，再写救治与风险边界。",
                 "证据不足时把补证写具体，再写保守处置路径。",
             ]
 
@@ -2702,6 +3131,12 @@ class MultiAgentOrchestrator:
                 "uncertainty_triggers": self._unique_strings(counter_evidence[:2] + open_questions[:2])[:4],
                 "report_priority": report_priority,
                 "evidence_sufficiency": "",
+                "source_agreement": self._unique_strings(previous_state.get("source_agreement", []))[:4],
+                "source_conflicts": self._unique_strings(previous_state.get("source_conflicts", []))[:4],
+                "mechanism_hypotheses": self._unique_strings(previous_state.get("mechanism_hypotheses", []))[:4],
+                "action_gate": str(previous_state.get("action_gate", "balanced")).strip() or "balanced",
+                "quorum_score": float(previous_state.get("quorum_score", 0.0) or 0.0),
+                "inhibition_score": float(previous_state.get("inhibition_score", 0.0) or 0.0),
             }
         ).model_dump(mode="json")
 
@@ -2724,6 +3159,14 @@ class MultiAgentOrchestrator:
             "next_focus": list(shared_state.get("next_focus", []))[:5],
             "conflicts": list(shared_state.get("conflicts", []))[:5],
             "uncertainty_score": shared_state.get("uncertainty_score", 0.5),
+            "quorum_score": shared_state.get("quorum_score", 0.0),
+            "inhibition_score": shared_state.get("inhibition_score", 0.0),
+            "source_agreement": list(shared_state.get("source_agreement", []))[:4],
+            "source_conflicts": list(shared_state.get("source_conflicts", []))[:4],
+            "mechanism_hypotheses": list(shared_state.get("mechanism_hypotheses", []))[:4],
+            "action_gate": shared_state.get("action_gate", "balanced"),
+            "mechanism_tags": shared_state.get("mechanism_tags", {}),
+            "source_routing": shared_state.get("source_routing", {}),
         }
         if round_idx <= 1:
             payload["consensus"] = list(shared_state.get("consensus", []))[:5]
@@ -2732,40 +3175,53 @@ class MultiAgentOrchestrator:
     @staticmethod
     def _compact_kb_evidence_for_expert(kb_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
         compacted: list[dict[str, Any]] = []
-        priority_keys = (
-            "case_id",
-            "id",
-            "title",
-            "crop",
-            "diagnosis",
-            "summary",
-            "symptoms",
-            "key_evidence",
-            "actions",
-            "confidence",
-            "source",
-        )
         for item in kb_evidence[:4]:
             if not isinstance(item, dict):
                 continue
-            compact = {
-                key: item.get(key)
-                for key in priority_keys
-                if key in item and item.get(key) not in (None, "", [])
-            }
+            entry_type = str(item.get("entry_type", "")).lower()
+            is_kb_chunk = entry_type in {"chunk"} or "chunk" in entry_type
+            if is_kb_chunk:
+                compact = {
+                    "source": "知识库",
+                    "title": item.get("title", ""),
+                    "content": item.get("content", "")[:800] if item.get("content") else "",
+                }
+            else:
+                priority_keys = (
+                    "case_id",
+                    "id",
+                    "title",
+                    "crop",
+                    "diagnosis",
+                    "summary",
+                    "symptoms",
+                    "key_evidence",
+                    "actions",
+                    "confidence",
+                    "source",
+                    "memory_level",
+                    "memory_score",
+                    "mechanism_tags",
+                    "retrieval",
+                )
+                compact = {
+                    key: item.get(key)
+                    for key in priority_keys
+                    if key in item and item.get(key) not in (None, "", [])
+                }
             if compact:
                 compacted.append(compact)
         return compacted
 
     def _initial_report_priority(self, caption: CaptionSchema) -> list[str]:
         priority = [
-            "先写病例摘要，再写诊断判断与置信说明",
-            "复查与补证建议写清可执行动作，再展开救治路径",
+            "先写基本信息，再写症状观察和鉴别诊断",
+            "防治建议写清可执行动作，再展开救治路径",
         ]
         if float(caption.numeric.severity_score) >= 0.5:
-            priority.append("救治建议与实施路径前置，并突出风险边界、预后与复查")
+            priority.append("防治建议中突出紧急措施")
         if float(caption.ood_score) >= 0.25 or float(caption.confidence) <= 0.55:
-            priority.append("复查与补证建议前置，并降低结论措辞强度")
+            priority.append("鉴别诊断中降低结论措辞强度")
         return self._unique_strings(priority)
 
     def _default_report_outline(
@@ -2777,10 +3233,11 @@ class MultiAgentOrchestrator:
         _ = safety_result
         return self._unique_strings(
             [
-                "病例摘要：可见征象与受害范围，不写确诊口径。",
-                f"诊断判断与置信说明：首位疑似「{diagnosis_name}」、模型倾向、支持/鉴别与知识库摘要（若有）。",
-                "复查与补证建议：优先补什么、有何帮助、可怎么做。",
-                "救治建议与实施路径：分步动作、观察与升级条件（证据不足不写具体药剂配方）。",
-                "风险边界、预后与复查：禁忌、恶化信号与复查节点。",
+                "基本信息：作物、病原、诊断病害、置信度、病害阶段；可含地点/生育期/受害部位（病害三角-寄主与环境）。",
+                "症状观察：客观病征条目；尽量写清严重度与分布（量化优于模糊词）。",
+                f"鉴别诊断：候选排序表；首位疑似「{diagnosis_name}」及依据/鉴别点。",
+                "防治建议：先农业调控与核查，再药剂表格；证据不足写类别级建议。",
+                "预后评估：可治愈性、受损叶、周边风险、产量影响等表格。",
+                "备注：证据边界与补证/复核闭环，引用块收束。",
             ]
         )

@@ -68,18 +68,7 @@ _CAPTION_VALUE_CN = {
     "unknown": "无法判断",
 }
 
-_INTERNAL_TEXT_REPLACEMENTS = {
-    "DINOv3": "图像分析",
-    "分类头与分割头结果不一致": "整体印象与局部病斑特征并不完全一致",
-    "分类头与分割头结果冲突": "整体印象与局部病斑特征并不完全一致",
-    "分类头": "整体印象",
-    "分割头": "局部病斑特征",
-    "补充叶背近景、同叶位复拍图和整株图像": "继续保持审慎判断",
-    "补充叶背近景和同叶位复拍图像": "继续保持审慎判断",
-    "进一步检验": "进一步观察",
-    "进一步检测": "进一步观察",
-    "补图": "继续观察",
-}
+from app.core.agents.sanitizer import TEXT_REPLACEMENTS as _INTERNAL_TEXT_REPLACEMENTS
 
 _SUMMARY_CONCLUSION_PATTERN = re.compile(
     r"(倾向于|更偏向|首要诊断|置信|把握度|当前判断|倾向性诊断|相对明确诊断|疑似|考虑为|更像)"
@@ -283,17 +272,17 @@ def _build_image_specific_basis(
     support_line = str(clinical_profile.get("basis_support_line") or "").strip()
     limit_line = str(clinical_profile.get("basis_limit_line") or "").strip()
     conclusion_line = (
-        f"因此更稳妥的表达是：将“{primary_name}”列为首位疑似候选，"
-        f"并继续与“{secondary_name or '其他坏死性叶部病害'}”做并行鉴别。"
+        f"因此更稳妥的表达是：将「{primary_name}」列为首位疑似候选，"
+        f"并继续与「{secondary_name or '其他坏死性叶部病害'}」做并行鉴别。"
     )
     return [support_line, limit_line, conclusion_line]
 
 
 def _build_consistency_note(case_text: str, caption: CaptionSchema) -> str:
     if _text(case_text) and _text(caption.visual_summary):
-        return "文字描述与图像摘要大体同向，可作为当前病例判断的共同基础。"
+        return "田间与环境补充说明与图像摘要大体同向，可作为当前病例判断的共同基础。"
     if _text(case_text):
-        return "当前仍可把文字描述视为重要的辅助线索。"
+        return "当前仍可把田间与环境补充说明视为重要的辅助线索。"
     return ""
 
 
@@ -549,7 +538,7 @@ def _gap_diagnostic_value(gap: str, primary_name: str, secondary_name: str, conf
     if not text:
         return ""
     if any(token in text for token in ("叶背", "背面", "霉层")):
-        return f"这类信息能帮助判断是否存在更支持“{primary_name}”或“{secondary_name or '其他相似叶部病害'}”的典型附着特征。"
+        return f"这类信息能帮助判断是否存在更支持「{primary_name}」或「{secondary_name or '其他相似叶部病害'}」的典型附着特征。"
     if any(token in text for token in ("整株", "新叶", "叶柄", "茎", "果实", "邻近")):
         return "这类信息能判断病害是局限于单叶，还是已经扩展到整株其他部位，从而影响主诊断排序和处理强度。"
     if any(token in text for token in ("24", "48", "复拍", "时序", "扩展", "变化", "新发")):
@@ -699,14 +688,14 @@ def _rank_shift_hint_for_gap(gap: str, primary_name: str, secondary_name: str) -
         return ""
     secondary = secondary_name or "替代候选病害"
     if any(token in text for token in ("叶背", "背面", "霉层", "浸润")):
-        return f"若叶背出现更典型阳性征象，“{secondary}”排序应上调；若持续缺乏该征象，“{primary_name}”排序更稳。"
+        return f"若叶背出现更典型阳性征象，「{secondary}」排序应上调；若持续缺乏该征象，「{primary_name}」排序更稳。"
     if any(token in text for token in ("24", "48", "复拍", "时序", "扩展", "新发")):
         return "若 24 到 48 小时外扩速度明显加快或连续新发，应上调侵染性候选；若变化轻微且无新发，可下调激进判断。"
     if any(token in text for token in ("整株", "新叶", "叶柄", "茎", "果实", "邻近")):
         return "若整株多叶位同步受累，应提高扩展性病害权重；若仍局限于单叶，应维持保守排序。"
     if any(token in text for token in ("湿度", "结露", "通风", "灌溉", "环境")):
         return "若持续高湿和结露并伴随病斑推进，应提高风险等级；若环境纠偏后病情趋稳，可下调处理强度。"
-    return f"该补证结果可直接影响“{primary_name}”与“{secondary}”的排序先后。"
+    return f"该补证结果可直接影响「{primary_name}」与「{secondary}」的排序先后。"
 
 
 def _build_uncertainty_management(
@@ -761,7 +750,7 @@ def _build_uncertainty_management(
             "model_score_interpretation": classification_score_note
             or "模型分数仅反映类别倾向，不等同于确诊概率。",
             "evidence_ceiling": (
-                "当前更稳妥的证据上限是“存在严重叶部坏死性损伤”，病名以分类模型倾向为准并需补证后收敛；"
+                "当前更稳妥的证据上限是「存在严重叶部坏死性损伤」，病名以分类模型倾向为准并需补证后收敛；"
                 + str(clinical_profile.get("classification_policy_note") or "").strip()
             ),
         },
@@ -807,8 +796,8 @@ def _build_decision_support(
     )
     post_review_branches = _list_text(
         [
-            f"若触发升级条件：上调“{secondary_name or '高风险候选'}”权重，并进入升级处理路径。",
-            f"若满足降级条件：维持“{primary_name}”为主排序并继续低风险管理复查。",
+            f"若触发升级条件：上调「{secondary_name or '高风险候选'}」权重，并进入升级处理路径。",
+            f"若满足降级条件：维持「{primary_name}」为主排序并继续低风险管理复查。",
         ],
         limit=2,
     )
@@ -909,6 +898,128 @@ def _build_tomato_qa_guidance(rounds: Any) -> dict[str, Any]:
     }
 
 
+_PLACEHOLDER_PRIMARY_NAMES = frozenset({"待复核病害", "未知"})
+
+
+def _is_placeholder_primary_name(name: Any) -> bool:
+    t = _text(name)
+    if not t:
+        return True
+    if t in _PLACEHOLDER_PRIMARY_NAMES:
+        return True
+    if t.startswith("未映射类别"):
+        return True
+    return False
+
+
+def _reorder_candidates_demote_placeholder(merged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """避免「待复核病害」占位行排在视觉主类（如晚疫病）之前。"""
+    if len(merged) < 2:
+        return merged
+    if not _is_placeholder_primary_name(merged[0].get("name")):
+        return merged
+    for i in range(1, len(merged)):
+        if not _is_placeholder_primary_name(merged[i].get("name")):
+            row = merged.pop(i)
+            merged.insert(0, row)
+            return merged
+    return merged
+
+
+def _patch_placeholder_only_candidates(
+    candidates: list[dict[str, Any]],
+    visual_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """若合并后仅剩占位病名，用视觉候选首项替换病名与依据。"""
+    if len(candidates) != 1 or not visual_candidates:
+        return candidates
+    only = candidates[0]
+    if not _is_placeholder_primary_name(only.get("name")):
+        return candidates
+    vc0 = visual_candidates[0]
+    vn = _text(vc0.get("name"))
+    if not vn or _is_placeholder_primary_name(vn):
+        return candidates
+    only["name"] = vn
+    only["supporting_evidence"] = _list_text(
+        _list_text(only.get("supporting_evidence", []), limit=4)
+        + _list_text(vc0.get("supporting_evidence", []), limit=4),
+        limit=4,
+    )
+    only["counter_evidence"] = _list_text(
+        _list_text(only.get("counter_evidence", []), limit=3)
+        + _list_text(vc0.get("counter_evidence", []), limit=3),
+        limit=3,
+    )
+    only["missing_information"] = _list_text(
+        _list_text(only.get("missing_information", []), limit=3)
+        + _list_text(vc0.get("missing_information", []), limit=3),
+        limit=3,
+    )
+    return candidates
+
+
+def _resolve_decision_primary_name(
+    candidates: list[dict[str, Any]],
+    visual_candidates: list[dict[str, Any]],
+    diagnosis_board: dict[str, Any],
+) -> str:
+    def _visual_fallback() -> str:
+        for vc in visual_candidates:
+            vn = _text(vc.get("name"))
+            if vn and not _is_placeholder_primary_name(vn):
+                return vn
+        return ""
+
+    if candidates:
+        first = _text(candidates[0].get("name"))
+        if not _is_placeholder_primary_name(first):
+            return first
+        fb = _visual_fallback()
+        return fb or first
+    wd = diagnosis_board.get("working_diagnoses") or []
+    base = _text(wd[0]) if wd else ""
+    if base and not _is_placeholder_primary_name(base):
+        return base
+    fb = _visual_fallback()
+    return fb or base
+
+
+def _resolve_primary_vision_first(
+    candidates: list[dict[str, Any]],
+    visual_candidates: list[dict[str, Any]],
+    diagnosis_board: dict[str, Any],
+    vision_conflict: dict[str, Any] | None,
+) -> str:
+    """
+    主诊断优先采用视觉解读模块输出（分类头 + 融合排序后的 visual_candidates），
+    再回退到多智能体协调/证据链。
+    """
+    conflict = bool(isinstance(vision_conflict, dict) and vision_conflict.get("has_conflict"))
+    for vc in visual_candidates:
+        vn = _text(vc.get("name"))
+        if not vn or _is_placeholder_primary_name(vn) or vn == "未知":
+            continue
+        if vn == "健康" and conflict:
+            continue
+        return vn
+    return _resolve_decision_primary_name(candidates, visual_candidates, diagnosis_board)
+
+
+def _ensure_primary_name_first_row(
+    candidates: list[dict[str, Any]],
+    primary_name: str,
+) -> list[dict[str, Any]]:
+    if not primary_name or len(candidates) < 2:
+        return candidates
+    idx = next((i for i, c in enumerate(candidates) if _text(c.get("name")) == primary_name), None)
+    if idx is None or idx == 0:
+        return candidates
+    row = candidates.pop(idx)
+    candidates.insert(0, row)
+    return candidates
+
+
 def _build_candidate_diagnoses(shared_state: dict[str, Any], vision_result: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     diagnosis_board = _board_dict(shared_state, "diagnosis_board")
     evidence_entries = _diagnosis_entries_from_state(shared_state, {})
@@ -970,6 +1081,8 @@ def _build_candidate_diagnoses(shared_state: dict[str, Any], vision_result: dict
                 current["missing_information"] + _list_text(item.get("missing_information", []), limit=3),
                 limit=3,
             )
+        merged = _reorder_candidates_demote_placeholder(merged)
+        merged = _patch_placeholder_only_candidates(merged, visual_candidates)
         return merged[:3]
     working = _list_text(diagnosis_board.get("working_diagnoses", []), limit=2)
     if working:
@@ -990,8 +1103,10 @@ def build_final_decision_packet(
     risk_board = _board_dict(shared_state, "risk_board")
     candidates = _build_candidate_diagnoses(shared_state, vision_result)
     visual_candidates = _build_visual_candidate_diagnoses(vision_result)
+    vision_conflict = _build_vision_conflict_section(vision_result)
     uncertainty_score = float(shared_state.get("uncertainty_score", 0.5) or 0.5)
-    primary_name = candidates[0]["name"] if candidates else _text((diagnosis_board.get("working_diagnoses") or [""])[0])
+    primary_name = _resolve_primary_vision_first(candidates, visual_candidates, diagnosis_board, vision_conflict)
+    candidates = _ensure_primary_name_first_row(candidates, primary_name)
     statement_style = "倾向性诊断，避免确定性表述" if uncertainty_score >= 0.25 else "可给出相对明确的判断，但仍需说明边界"
 
     evidence_sufficiency = _normalize_internal_text(_text(shared_state.get("evidence_sufficiency")))
@@ -1000,7 +1115,7 @@ def build_final_decision_packet(
 
     return {
         "case_summary": _build_case_summary(case_text, caption),
-        "vision_conflict": _build_vision_conflict_section(vision_result),
+        "vision_conflict": vision_conflict,
         "diagnosis_summary": {
             "primary_candidate": primary_name,
             "candidate_diagnoses": candidates,
@@ -1017,6 +1132,27 @@ def build_final_decision_packet(
         ),
         "verification_tasks": _list_text(evidence_board.get("verification_value", []), limit=4),
         "safety_notes": _list_text(risk_board.get("risk_flags", []), limit=4),
+        "mechanism_summary": {
+            "mechanism_tags": shared_state.get("mechanism_tags", {}) if isinstance(shared_state, dict) else {},
+            "mechanism_hypotheses": _list_text(shared_state.get("mechanism_hypotheses", []), limit=4)
+            if isinstance(shared_state, dict)
+            else [],
+        },
+        "protocol_summary": {
+            "quorum_score": round(float(shared_state.get("quorum_score", 0.0) or 0.0), 4)
+            if isinstance(shared_state, dict)
+            else 0.0,
+            "inhibition_score": round(float(shared_state.get("inhibition_score", 0.0) or 0.0), 4)
+            if isinstance(shared_state, dict)
+            else 0.0,
+            "action_gate": _text(shared_state.get("action_gate", "balanced")) if isinstance(shared_state, dict) else "balanced",
+            "source_agreement": _list_text(shared_state.get("source_agreement", []), limit=4)
+            if isinstance(shared_state, dict)
+            else [],
+            "source_conflicts": _list_text(shared_state.get("source_conflicts", []), limit=4)
+            if isinstance(shared_state, dict)
+            else [],
+        },
         "report_priority": [],
         "boards": {
             "diagnosis_board": diagnosis_board,
@@ -1072,7 +1208,7 @@ def _build_vision_conflict_section(vision_result: dict[str, Any] | None) -> dict
     classification_confidence = _to_float(fusion_summary.get("classification_confidence"), default=0.0)
     confidence_text = _format_percent(classification_confidence)
     if classification_result and confidence_text:
-        score_note = f"模型对“{classification_result}”给出约 {confidence_text} 的类别倾向，该分数不等同于确诊概率。"
+        score_note = f"模型对「{classification_result}」给出约 {confidence_text} 的类别倾向，该分数不等同于确诊概率。"
     else:
         score_note = "模型分数仅表示类别倾向，不等同于确诊概率。"
     area_summary_cn = {
@@ -1167,7 +1303,7 @@ def _build_visual_candidate_diagnoses(vision_result: dict[str, Any] | None) -> l
             candidate = ensure_candidate(item.get("class_name"))
             if candidate is None:
                 continue
-            evidence = f"分类模型中“{candidate['name']}”呈现较高类别倾向（约 {_format_percent(confidence)}），仅作候选参考。"
+            evidence = f"分类模型中「{candidate['name']}」呈现较高类别倾向（约 {_format_percent(confidence)}），仅作候选参考。"
             if evidence not in candidate["supporting_evidence"]:
                 candidate["supporting_evidence"].append(evidence)
             candidate["_score"] = max(float(candidate["_score"]), confidence)
@@ -1184,7 +1320,7 @@ def _build_visual_candidate_diagnoses(vision_result: dict[str, Any] | None) -> l
                 candidate = ensure_candidate(item.get("class_name"))
                 if candidate is None:
                     continue
-                evidence = f"整体分类结果中，“{candidate['name']}”呈现较高类别倾向（约 {_format_percent(confidence)}），仅作候选参考。"
+                evidence = f"整体分类结果中，「{candidate['name']}」呈现较高类别倾向（约 {_format_percent(confidence)}），仅作候选参考。"
                 if evidence not in candidate["supporting_evidence"]:
                     candidate["supporting_evidence"].append(evidence)
                 candidate["_score"] = max(float(candidate["_score"]), confidence)
@@ -1193,7 +1329,7 @@ def _build_visual_candidate_diagnoses(vision_result: dict[str, Any] | None) -> l
     if primary_visual and normalize_label(primary_visual) not in {"", "healthy", "leaf"}:
         candidate = ensure_candidate(primary_visual)
         if candidate is not None:
-            evidence = f"当前视觉病种判断仍以整体分类为主，对“{candidate['name']}”有一定倾向，但证据仍需补齐。"
+            evidence = f"当前视觉病种判断仍以整体分类为主，对「{candidate['name']}」有一定倾向，但证据仍需补齐。"
             if evidence not in candidate["supporting_evidence"]:
                 candidate["supporting_evidence"].append(evidence)
             candidate["_score"] = max(float(candidate["_score"]), 2.0)
@@ -1338,12 +1474,23 @@ def build_report_packet(
     diagnosis_entries = _diagnosis_entries_from_state(latest_state, final_result)
 
     top = final_result.get("top_diagnosis", {}) if isinstance(final_result, dict) else {}
-    primary_name = _normalize_internal_text(class_name_to_cn(_text(top.get("name")))) or _normalize_internal_text(
-        class_name_to_cn(_text((diagnosis_board.get("working_diagnoses") or [""])[0]))
-    )
     vision_conflict = _build_vision_conflict_section(vision_result)
     clinical_profile = build_leaf_clinical_profile(caption, vision_conflict)
     visual_candidates = _build_visual_candidate_diagnoses(vision_result)
+    candidates_from_state = _build_candidate_diagnoses(latest_state, vision_result)
+    primary_name = _resolve_primary_vision_first(
+        candidates_from_state,
+        visual_candidates,
+        diagnosis_board,
+        vision_conflict,
+    )
+    candidates_from_state = _ensure_primary_name_first_row(candidates_from_state, primary_name)
+    if _is_placeholder_primary_name(primary_name) or not primary_name:
+        primary_name = _resolve_decision_primary_name(candidates_from_state, visual_candidates, diagnosis_board)
+    if not primary_name:
+        raw_top = _normalize_internal_text(class_name_to_cn(_text(top.get("name"))))
+        raw_wd = _normalize_internal_text(class_name_to_cn(_text((diagnosis_board.get("working_diagnoses") or [""])[0])))
+        primary_name = raw_top or raw_wd
     tomato_qa_guidance = _build_tomato_qa_guidance(rounds)
     ranked_differentials = _list_text(
         [class_name_to_cn(_text(item.get("name", ""))) for item in diagnosis_board.get("differentials", [])],
@@ -1355,14 +1502,15 @@ def build_report_packet(
         primary_name=primary_name,
     )
 
-    report_outline = _list_text(final_result.get("report_outline", []), limit=5)
+    report_outline = _list_text(final_result.get("report_outline", []), limit=6)
     if not report_outline or any(_looks_mojibake(item) for item in report_outline):
         report_outline = [
-            "病例摘要：归纳可见表现和受害范围，不写确诊口径。",
-            "诊断判断与置信说明：首位疑似、模型倾向、支持/鉴别与知识库摘要（若有）。",
-            "复查与补证建议：优先补什么、为何有用、可怎么做（语气务实，少堆「缺口」）。",
-            "救治建议与实施路径：可执行步骤、观察与升级条件（证据不足不写具体药剂配方）。",
-            "风险边界、预后与复查：禁忌、恶化信号与复查节点。",
+            "基本信息：作物、诊断病害、病原、置信度、病害阶段，表格形式。",
+            "症状观察：客观病征条目，不写确诊。",
+            "鉴别诊断：候选病害、可能性、依据，表格形式。",
+            "防治建议：立即核查、药剂防治、农业防治分节写。",
+            "预后评估：可治愈性、受损与周边风险、产量影响，表格形式。",
+            "备注：证据边界与补证/线下复核要点，引用块收束。",
         ]
 
     evidence_sufficiency = _normalize_internal_text(_text(final_result.get("evidence_sufficiency") or safety_result.get("evidence_sufficiency")))
@@ -1467,88 +1615,80 @@ def build_report_packet(
         vision_conflict=vision_conflict,
     )
 
-    summary_title, diagnosis_title, followup_title, action_title, risk_title = REQUIRED_REPORT_SECTIONS
+    (
+        info_title,
+        symptom_title,
+        diff_title,
+        treat_title,
+        prognosis_title,
+        notes_title,
+    ) = REQUIRED_REPORT_SECTIONS
     section_facts = {
-        summary_title: {
+        info_title: {
+            "crop": "番茄",
+            "primary_diagnosis": primary_name,
+            "confidence_label": confidence_label,
+            "model_score_note": score_note,
+            "stage_hint": stage_hint,
+            "classification_confidence": classification_confidence,
+            "secondary_differential": secondary_differential,
+            "disease_context_snippets": disease_context_snippets,
+            "morphology": morphology,
+            "visual_summary": visual_summary,
+        },
+        symptom_title: {
             "visual_only_bundle": visual_only_bundle,
             "morphology": morphology,
             "visual_summary": visual_summary,
-            "stage_hint": stage_hint,
             "consistency_note": consistency_note,
-            "classification_policy_note": clinical_profile.get("classification_policy_note"),
+            "diagnosis_evidence": diagnosis_entries,
+            "visual_candidates": visual_candidates,
         },
-        diagnosis_title: {
+        diff_title: {
             "primary_diagnosis": primary_name,
             "diagnosis_statement": diagnosis_statement,
             "confidence_label": confidence_label,
             "confidence_boundary": confidence_boundary,
             "model_score_note": score_note,
             "secondary_differential": secondary_differential,
-            "second_candidate_brief": second_candidate_brief,
             "disease_context_snippets": disease_context_snippets,
-            "disease_entity_writing_requirement": (
-                "诊断章节必须包含「这种病是什么」的说明：用 2–5 句客观解释病原或病害性质、典型为害方式、"
-                "与当前叶片可见征象的对应；禁止只写病名单词或只写排序。可融合下方百科摘录与模型倾向说明。"
-            ),
-            "kb_snippet_instruction": (
-                "若存在病害百科摘录，用一两句融入叙述并标明来源于知识库摘要；若无摘录则说明暂无匹配条目，勿编造。"
-            ),
             "diagnosis_board": diagnosis_board,
             "diagnosis_evidence": diagnosis_entries,
             "visual_candidates": visual_candidates,
             "image_specific_basis": image_specific_basis,
-            "visual_model_outputs": vision_conflict.get("visual_model_outputs", {}),
             "vision_conflict": {
                 "has_conflict": bool(vision_conflict.get("has_conflict", False)),
                 "reason_summary": _text(vision_conflict.get("reason_summary")),
-                "recommended_interpretation": _text(vision_conflict.get("recommended_interpretation")),
             },
         },
-        followup_title: {
-            "evidence_board": evidence_board,
-            "gap_items": gap_items,
-            "tomato_focus": _list_text(tomato_qa_guidance.get("observe_points", []), limit=3),
-            "caption_answer_confidences": _list_text(
-                [
-                    f"{_text(item.get('question'))}: {_text(item.get('answer'))}（{_format_percent(float(item.get('confidence', 0.0) or 0.0))}）"
-                    for item in (
-                        vision_conflict.get("visual_model_outputs", {}).get("caption_answer_confidences", [])
-                        if isinstance(vision_conflict.get("visual_model_outputs", {}), dict)
-                        else []
-                    )
-                    if isinstance(item, dict)
-                ],
-                limit=6,
-            ),
-            "uncertainty_management": uncertainty_management,
-            "writing_note": "用复查、补拍、记录等务实表述组织内容，避免通篇「缺口」腔。",
-        },
-        action_title: {
-            "action_board": action_board,
+        treat_title: {
             "today_actions": today_actions,
             "control_options": control_options,
             "observe_48h": observe_48h,
             "escalation_conditions": escalation_conditions,
-            "treatment_layers": {
-                "first_layer_low_risk": today_actions,
-                "second_layer_conditioned": control_options,
-            },
-            "timeline": action_timeline,
-            "decision_support": decision_support,
+            "gap_items": gap_items,
+            "action_board": action_board,
+            "evidence_board": evidence_board,
             "primary_diagnosis_for_narration": primary_name,
-            "leaf_clinical_profile": {
-                "damage_tier": clinical_profile.get("damage_tier"),
-                "ratio_percent_text": clinical_profile.get("ratio_percent_text"),
-                "classification_policy_note": clinical_profile.get("classification_policy_note"),
-            },
         },
-        risk_title: {
-            "risk_board": risk_board,
+        prognosis_title: {
             "prohibited_actions": prohibited_actions,
             "safety_notes": safety_notes,
             "required_followups": required_followups,
             "prognosis_note": prognosis_note,
-            "decision_support": decision_support,
+            "today_actions": today_actions,
+            "observe_48h": observe_48h,
+        },
+        notes_title: {
+            "evidence_sufficiency": evidence_sufficiency,
+            "primary_diagnosis": primary_name,
+            "secondary_differential": secondary_differential,
+            "conflict_brief": _text(vision_conflict.get("reason_summary"))
+            if isinstance(vision_conflict, dict)
+            else "",
+            "gap_items": gap_items[:3],
+            "required_followups": required_followups,
+            "uncertainty_management": uncertainty_management,
         },
     }
 
@@ -1960,7 +2100,7 @@ def build_report_writer_narrative_briefing(
         "你正在撰写《农业救治报告》的一个章节。材料 below 来自多智能体讨论、视觉模型与知识库检索；"
         "请用连贯中文段落输出，不要输出 JSON、不要复述键名。",
         "",
-        "**读者与分工**：农户与一线植保；报告无单独开篇决策卡，五章顺排。"
+        "**读者与分工**：农户与一线植保；报告无单独开篇决策卡，六章顺排。"
         "本章只写**本节职责内**信息，与他节勿整段复读同一套总述；落实短句、若则绑定，勿用【】标签式小标题。",
         "",
         "## 病害实体（全篇尤其是「诊断判断」必须交代清楚）",

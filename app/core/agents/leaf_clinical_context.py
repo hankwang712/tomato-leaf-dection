@@ -6,7 +6,6 @@ from typing import Any
 
 from app.core.caption.schema import CaptionSchema
 
-# 比例与严重度阈值（与历史行为保持一致，集中维护）
 RATIO_EXTENSIVE = 0.35
 RATIO_MODERATE = 0.15
 RATIO_MORPH_HEAVY = 0.40
