@@ -35,6 +35,7 @@ def list_documents(request: Request) -> KnowledgeDocumentsPayload:
                 "source_name": item.get("source_name", ""),
                 "content_format": item.get("content_format", "text"),
                 "char_count": int(item.get("char_count", 0)),
+                "chunk_count": int(item.get("chunk_count", 0)),
                 "preview": item.get("preview", ""),
                 "timestamp": item.get("timestamp", ""),
             }

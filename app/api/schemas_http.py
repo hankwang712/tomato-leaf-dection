@@ -52,6 +52,7 @@ class KnowledgeDocumentResponse(BaseModel):
     source_name: str = ""
     content_format: str
     char_count: int
+    chunk_count: int = 0
     preview: str = ""
     timestamp: str
 
