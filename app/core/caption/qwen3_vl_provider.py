@@ -125,11 +125,14 @@ class LocalQwen3VLCaptionProvider(CaptionProvider):
         self,
         model_dir: str | Path,
         *,
+        adapter_model_dir: str | Path | None = None,
         max_new_tokens: int = 512,
         prefer_cuda: bool = True,
         timeout: int = 60,
     ):
         self.model_dir = Path(model_dir)
+        raw_adapter = str(adapter_model_dir).strip() if adapter_model_dir is not None else ""
+        self.adapter_model_dir = Path(raw_adapter) if raw_adapter else None
         self.max_new_tokens = max_new_tokens
         self.prefer_cuda = prefer_cuda
         self.timeout = timeout
@@ -147,7 +150,15 @@ class LocalQwen3VLCaptionProvider(CaptionProvider):
             self.model_dir / "preprocessor_config.json",
             self.model_dir / "model.safetensors.index.json",
         ]
-        return all(path.exists() for path in required)
+        if not all(path.exists() for path in required):
+            return False
+        if self.adapter_model_dir is None:
+            return True
+        adapter = self.adapter_model_dir
+        if not adapter.exists():
+            return False
+        # PEFT / LlamaFactory 等导出的 LoRA 目录通常含 adapter_config.json
+        return (adapter / "adapter_config.json").exists()
 
     def predict(self, case_text: str, image_bytes: bytes | None = None) -> CaptionSchema:
         if not image_bytes:
@@ -167,7 +178,10 @@ class LocalQwen3VLCaptionProvider(CaptionProvider):
             retry_parsed = self._infer_once(image=image, case_text=case_text, prompt_variant="retry")
             normalized = self._normalize_slot_payload(retry_parsed)
 
-        normalized["model_name"] = self.model_dir.name
+        if self.adapter_model_dir is not None:
+            normalized["model_name"] = f"{self.model_dir.name}+{self.adapter_model_dir.name}"
+        else:
+            normalized["model_name"] = self.model_dir.name
         normalized["task"] = "tomato_leaf_visible_symptom_slot_extraction"
         return normalized
 
@@ -266,10 +280,17 @@ class LocalQwen3VLCaptionProvider(CaptionProvider):
             "confidence": confidence,
             "ood_score": ood_score,
             "followup_questions": list(dict.fromkeys(followup_questions))[:4],
-            "evidence_refs": [
-                "qwen3vl:slot_extraction",
-                f"qwen3vl:model:{self.model_dir.name}",
-            ],
+            "evidence_refs": (
+                [
+                    "qwen3vl:slot_extraction",
+                    f"qwen3vl:model:{self.model_dir.name}",
+                    *(
+                        [f"qwen3vl:adapter:{self.adapter_model_dir.name}"]
+                        if self.adapter_model_dir is not None
+                        else []
+                    ),
+                ]
+            ),
         }
         _ = case_text
         return CaptionSchema.model_validate(payload)
@@ -296,6 +317,17 @@ class LocalQwen3VLCaptionProvider(CaptionProvider):
             )
             device = torch.device("cuda" if self.prefer_cuda and torch.cuda.is_available() else "cpu")
             model.to(device)
+            if self.adapter_model_dir is not None:
+                adapter_path = str(self.adapter_model_dir.resolve())
+                if not self.adapter_model_dir.exists():
+                    raise RuntimeError(f"Qwen3-VL 适配器路径不存在：{adapter_path}")
+                try:
+                    from peft import PeftModel
+                except Exception as err:  # noqa: BLE001
+                    raise RuntimeError(
+                        "加载 Qwen3-VL LoRA/PEFT 适配器需要安装 peft（requirements 已含 peft）。"
+                    ) from err
+                model = PeftModel.from_pretrained(model, adapter_path)
             model.eval()
             processor = AutoProcessor.from_pretrained(self.model_dir)
 

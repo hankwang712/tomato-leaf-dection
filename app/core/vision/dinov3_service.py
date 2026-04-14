@@ -26,7 +26,7 @@ def _normalize_label(value: str) -> str:
 
 
 def _disease_slug_for_match(name: str) -> str:
-    """对齐 PlantVillage 式「Tomato___Late_blight」与分割 classes.txt 里「Late_blight」等同义病名。"""
+    """对齐 PlantVillage 式 “Tomato___Late_blight” 与分割 classes.txt 里 “Late_blight” 等同义病名。"""
     raw = str(name).strip()
     if "___" in raw:
         raw = raw.split("___", 1)[-1]
@@ -418,7 +418,7 @@ class LocalDinoV3Diagnoser:
         """叶片区域 = 分割头 leaf 通道（与独立推理脚本里 leaf_pixels = pred_mask[0].sum() 一致）。
 
         当 classes.txt 中**存在** leaf 类别时，**即使该通道全为 0** 也仍用该通道，而不用
-        disease∪healthy 作分母——后者会把「叶片像素」撑成几乎整图，导致病斑/叶片占比严重失真。
+        disease∪healthy 作分母——后者会把“叶片像素”撑成几乎整图，导致病斑/叶片占比严重失真。
         仅当配置里根本没有 leaf 通道时，才退回用 disease∪healthy 近似叶片区域。
         """
         torch = self._torch

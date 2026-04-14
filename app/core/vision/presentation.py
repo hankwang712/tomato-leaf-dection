@@ -40,6 +40,9 @@ def class_name_to_cn(name: str) -> str:
     text = str(name).strip()
     if not text:
         return "未知"
+    # 避免把「空列表」占位符映射成「未映射类别（[]）」
+    if text in ("[]", "[ ]"):
+        return "未知"
     mapped = _CLASS_NAME_CN.get(normalize_label(text))
     if mapped:
         return mapped

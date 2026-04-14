@@ -39,7 +39,7 @@ def merge_json_schema_guidance_into_messages(
 
     若再前置一条独立的 system，会得到 [system_schema, system_task, user, ...]，
     transformers 的 Qwen3 apply_chat_template 会报 TemplateError：
-    「System message must be at the beginning.」——必须把 schema 合并进**第一条** system。
+    “System message must be at the beginning.”——必须把 schema 合并进**第一条** system。
     """
     guidance = (
         "你必须返回一个严格符合该 Schema 的 JSON 对象。"
@@ -674,8 +674,9 @@ MULTI_AGENT_ROUTE_KEYS = [
     "safety_reviewer",
     "multi_agent_report_writer",
 ]
+SUMMARY_ROUTE_KEY = "case_summary_generator"
 BASELINE_ROUTE_KEY = "baseline_single_llm"
-DEFAULT_AGENT_ROUTE_KEYS = [*MULTI_AGENT_ROUTE_KEYS, BASELINE_ROUTE_KEY]
+DEFAULT_AGENT_ROUTE_KEYS = [*MULTI_AGENT_ROUTE_KEYS, BASELINE_ROUTE_KEY, SUMMARY_ROUTE_KEY]
 
 
 def _default_multi_agent_route(settings: Settings) -> LLMRoute:
@@ -785,6 +786,14 @@ def build_agent_model_routing(settings: Settings) -> dict[str, LLMRoute]:
         )
     else:
         routes[BASELINE_ROUTE_KEY] = _default_baseline_route(settings)
+
+    # 诊断报告生成器路由
+    summary_provider = settings.summary_llm.strip().lower()
+    if summary_provider == "local_transformers":
+        routes[SUMMARY_ROUTE_KEY] = LLMRoute(provider="local_transformers", model=settings.local_llm_model_dir)
+    else:
+        routes[SUMMARY_ROUTE_KEY] = LLMRoute(provider="openai", model=settings.summary_openai_model, client_name="summary_openai")
+
     return routes
 
 
@@ -827,6 +836,13 @@ def build_llm_client(settings: Settings) -> RoutedLLMClient:
         "ollama": OllamaClient(
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
+        ),
+        "summary_openai": OpenAICompatibleClient(
+            base_url=settings.summary_openai_base_url,
+            api_key=settings.summary_openai_api_key,
+            model=settings.summary_openai_model,
+            trust_env=False,
+            api_key_env_name="SUMMARY_OPENAI_API_KEY",
         ),
     }
     return RoutedLLMClient(
