@@ -14,7 +14,8 @@ class RerankerClient:
     timeout: int = 30
 
     def is_enabled(self) -> bool:
-        return bool(self.base_url.strip() and self.api_key.strip() and self.model.strip())
+        # API_KEY 可为空（例如本地 rerank 服务不设鉴权）
+        return bool(self.base_url.strip() and self.model.strip())
 
     def rerank(self, query: str, documents: list[str]) -> list[float] | None:
         if not self.is_enabled() or not documents:
@@ -25,10 +26,10 @@ class RerankerClient:
             "query": query,
             "documents": documents,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        key = str(self.api_key).strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
 
         try:
             with httpx.Client(timeout=self.timeout) as client:
