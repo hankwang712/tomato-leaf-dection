@@ -5,6 +5,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from app.core.retrieval.source_router import mechanism_overlap_score
+
 
 class CaseLibrary:
     def __init__(self, base_dir: str):
@@ -35,23 +37,79 @@ class CaseLibrary:
             "total_unverified": len(unverified),
         }
 
-    def retrieve_text(self, query: str, verified: bool = True, k: int = 3) -> list[dict[str, Any]]:
+    @staticmethod
+    def _record_text(record: dict[str, Any]) -> str:
+        return json.dumps(record, ensure_ascii=False)
+
+    @staticmethod
+    def _memory_score(record: dict[str, Any]) -> float:
+        try:
+            return max(0.0, min(1.0, float(record.get("memory_score", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _preliminary_score(
+        cls,
+        query: str,
+        record: dict[str, Any],
+        mechanism_tags: dict[str, Any] | None = None,
+    ) -> tuple[float, float, float]:
+        text = cls._record_text(record)
+        text_score = SequenceMatcher(None, query, text).ratio()
+        mechanism_score = mechanism_overlap_score(mechanism_tags or {}, record.get("mechanism_tags", {}))
+        memory_score = cls._memory_score(record)
+        reference_bonus = 0.12 if str(record.get("memory_level", "")).strip() == "reference_memory" else 0.0
+        score = text_score * 0.58 + mechanism_score * 0.22 + memory_score * 0.20 + reference_bonus
+        return max(0.0, min(1.0, score)), text_score, mechanism_score
+
+    def estimate_case_support(self, query: str, mechanism_tags: dict[str, Any] | None = None) -> float:
+        best = 0.0
+        for verified in (True, False):
+            for record in self.load_cases(verified=verified):
+                score, _, _ = self._preliminary_score(query, record, mechanism_tags)
+                best = max(best, score)
+        return max(0.0, min(1.0, best))
+
+    def retrieve_text(
+        self,
+        query: str,
+        verified: bool = True,
+        k: int = 3,
+        mechanism_tags: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         records = self.load_cases(verified=verified)
         scored: list[tuple[float, dict[str, Any]]] = []
         for record in records:
-            text = json.dumps(record, ensure_ascii=False)
-            score = SequenceMatcher(None, query, text).ratio()
-            scored.append((score, record))
+            score, text_score, mechanism_score = self._preliminary_score(query, record, mechanism_tags)
+            enriched = dict(record)
+            enriched["entry_type"] = "verified_case" if verified else "unverified_case"
+            enriched["retrieval"] = {
+                "stage": "case_memory_prefilter",
+                "preliminary_score": round(float(score), 4),
+                "text_similarity": round(float(text_score), 4),
+                "mechanism_overlap_score": round(float(mechanism_score), 4),
+                "memory_score": round(float(self._memory_score(record)), 4),
+            }
+            scored.append((score, enriched))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [item[1] for item in scored[:k]]
 
-    def should_write_verified(self, trace: dict[str, Any], safety: dict[str, Any]) -> bool:
+    def evaluate_case_quality(self, trace: dict[str, Any], safety: dict[str, Any]) -> dict[str, Any]:
         if not bool(safety.get("safety_passed", False)):
-            return False
+            return {
+                "write_verified": False,
+                "has_citation": False,
+                "has_supporting_evidence": False,
+            }
 
         rounds = trace.get("rounds", [])
         if not rounds:
-            return False
+            return {
+                "write_verified": False,
+                "has_citation": False,
+                "has_supporting_evidence": False,
+            }
 
         has_citation = False
         has_supporting_evidence = False
@@ -75,7 +133,15 @@ class CaseLibrary:
                 )
                 if turn.get("supporting_evidence") or has_board_support:
                     has_supporting_evidence = True
-        return has_citation and has_supporting_evidence
+
+        return {
+            "write_verified": has_citation and has_supporting_evidence,
+            "has_citation": has_citation,
+            "has_supporting_evidence": has_supporting_evidence,
+        }
+
+    def should_write_verified(self, trace: dict[str, Any], safety: dict[str, Any]) -> bool:
+        return bool(self.evaluate_case_quality(trace, safety).get("write_verified", False))
 
     def delete_by_run_id(self, run_id: str) -> dict[str, int]:
         removed_verified = self._delete_from_file(self.verified_file, run_id)
