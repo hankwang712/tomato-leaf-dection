@@ -3,9 +3,12 @@ __pycache__/
 .pytest_cache/
 *.ini
 runs/
+describe/
 
 # configure
 .env 
 
-# output file
+# output file and knowledge
 output/
+knowledge_bases/
+case_library/
