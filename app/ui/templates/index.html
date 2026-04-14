@@ -85,12 +85,11 @@
 
             <form id="run-form" class="input-form">
               <input id="problem_name" name="problem_name" type="hidden" value="番茄叶片图像诊断报告" />
-              <input id="case_text" name="case_text" type="hidden" value="" />
 
               <div class="field field-note">
                 <label>诊断模式</label>
                 <div class="static-note">
-                  当前流程默认直接根据上传的番茄叶片图片生成诊断与救治报告，不再需要额外输入用户问题。
+                  上传番茄叶片原图即可生成诊断与救治报告。若需结合当地小气候、棚室环境或栽培管理，可在下方“当地环境补充”中自愿填写。
                 </div>
               </div>
 
@@ -117,6 +116,17 @@
                     <span>上传番茄叶片图片，系统将直接分析原图并生成诊断报告</span>
                   </label>
                 </div>
+              </div>
+
+              <div class="field field-wide">
+                <label for="case_text">当地环境补充（可选）</label>
+                <textarea
+                  id="case_text"
+                  name="case_text"
+                  rows="3"
+                  maxlength="2000"
+                  placeholder="例如：连阴雨三天、棚内湿度大、滴灌、近期未用药…不填则仅依据照片分析。"
+                ></textarea>
               </div>
 
               <button id="submit-btn" type="submit" class="btn-primary">开始生成救治报告</button>
@@ -268,7 +278,7 @@
                   <textarea
                     id="kb-upload-text"
                     rows="6"
-                    placeholder="直接粘贴知识内容，或下方选择 .txt / .md / .markdown 文件。"
+                    placeholder="直接粘贴知识内容，或下方多选 .txt / .md / .markdown 文件批量上传。"
                   ></textarea>
                 </div>
 
@@ -278,12 +288,13 @@
                     <input
                       id="kb-upload-file"
                       type="file"
+                      multiple
                       accept=".txt,.md,.markdown,text/plain,text/markdown"
                       class="file-input"
                     />
                     <label id="kb-upload-file-label" for="kb-upload-file" class="file-label">
                       <span id="kb-upload-file-icon" class="file-icon" aria-hidden="true">📎</span>
-                      <span id="kb-upload-file-hint">支持 .txt、.md、.markdown</span>
+                      <span id="kb-upload-file-hint">支持 .txt、.md、.markdown，可多选批量上传</span>
                     </label>
                   </div>
                 </div>
@@ -324,6 +335,8 @@
       </div>
     </div>
 
+    <script src="/static/vendor/purify.min.js?v={{ static_version }}"></script>
+    <script src="/static/vendor/marked.min.js?v={{ static_version }}"></script>
     <script src="/static/app.js?v={{ static_version }}"></script>
   </body>
 </html>

@@ -616,7 +616,12 @@
     target.classList.toggle("status-pending", Boolean(opts.isPending) && !isError);
   }
 
-  const KB_FILE_DEFAULT_HINT = "支持 .txt、.md、.markdown";
+  const KB_FILE_DEFAULT_HINT = "支持 .txt、.md、.markdown，可多选批量上传";
+
+  function kbFileStem(name) {
+    const n = `${name || ""}`.trim();
+    return n.replace(/\.(txt|md|markdown)$/i, "") || n;
+  }
 
   function setKbUploadLabelUploading(isUploading) {
     const label = document.getElementById("kb-upload-file-label");
@@ -633,12 +638,14 @@
     }
     const icon = document.getElementById("kb-upload-file-icon");
     const hint = document.getElementById("kb-upload-file-hint");
-    const file = refs.kbUploadFile?.files?.[0] || null;
+    const files = Array.from(refs.kbUploadFile?.files || []);
+    const file = files[0] || null;
     if (file && icon && hint) {
       icon.textContent = "⏳";
       icon.classList.add("anim-hourglass");
       const name = file.name || "文件";
-      hint.textContent = `正在上传「${name}」…`;
+      hint.textContent =
+        files.length > 1 ? `正在上传（共 ${files.length} 个）「${name}」…` : `正在上传「${name}」…`;
     }
   }
 
@@ -650,18 +657,24 @@
     if (!input || !label || !icon || !hint) {
       return;
     }
-    const file = input.files?.[0] || null;
-    label.classList.toggle("file-label--has-file", Boolean(file));
-    if (!file) {
+    const files = Array.from(input.files || []);
+    const file = files[0] || null;
+    label.classList.toggle("file-label--has-file", Boolean(files.length));
+    if (!files.length) {
       icon.textContent = "📎";
       icon.classList.remove("anim-hourglass");
       hint.textContent = KB_FILE_DEFAULT_HINT;
       return;
     }
     icon.classList.remove("anim-hourglass");
-    icon.textContent = "📄";
-    const name = file.name || "已选文件";
-    hint.textContent = `${name} · ${formatBytes(file.size)} · 点击可更换`;
+    icon.textContent = files.length > 1 ? "📚" : "📄";
+    if (files.length === 1) {
+      const name = file.name || "已选文件";
+      hint.textContent = `${name} · ${formatBytes(file.size)} · 点击可更换`;
+      return;
+    }
+    const totalBytes = files.reduce((s, f) => s + (f.size || 0), 0);
+    hint.textContent = `已选 ${files.length} 个文件 · 合计 ${formatBytes(totalBytes)} · 点击可重新选择`;
   }
 
   function getFinalPayload() {
@@ -1147,107 +1160,57 @@
     renderCurrentRun();
   }
 
-  function parseInline(text) {
-    return escapeHtml(text)
-      .replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  /** 模型偶发把表头与 :--- 行、相邻表行粘在一行；先拆开再交给 marked（GFM 表格） */
+  function normalizeMarkdownForRender(md) {
+    let s = `${md || ""}`.replace(/\r\n/g, "\n");
+
+    // Fix glued table rows (no space between pipes): || → |\n|
+    s = s.replace(/\|\|(\s*[|:\-])/g, "|\n|$1");
+    s = s.replace(/\|\|(\s*\|)/g, "|\n|");
+
+    // Fix spaced table rows collapsed onto one line: "| |" at row boundary
+    // The space appears BETWEEN two pipes only at row boundaries, not within cells
+    s = s.replace(/\| \|(\s*[-:])/g, "|\n|$1");   // "| |---" or "| |:---" → separator row
+    s = s.replace(/(\|) \|([^\-:\s])/g, "$1\n|$2"); // "| |汉字" → data row start
+
+    // Fix blockquote lines collapsed onto same line: "> text> " → "> text\n> "
+    s = s.replace(/(>[^\n]+) (>)/g, "$1\n$2");
+
+    // Fix bold subheadings followed immediately by bullet list items
+    // e.g. "**症状观察** - 叶片..." → "**症状观察**\n- 叶片..."
+    s = s.replace(/(\*\*[^*\n]+\*\*) ([-*] )/g, "$1\n$2");
+
+    return s;
   }
 
   function appendMarkdown(container, markdown) {
     const root = el("div", "markdown-body");
-    const lines = `${markdown || ""}`.replace(/\r\n/g, "\n").split("\n");
-    let paragraph = [];
-    let listItems = [];
-    let inCode = false;
-    let codeLines = [];
-
-    function flushParagraph() {
-      if (!paragraph.length) {
-        return;
+    const src = normalizeMarkdownForRender(markdown);
+    let html = "";
+    const hasMarked = typeof marked !== "undefined" && marked && typeof marked.parse === "function";
+    if (hasMarked) {
+      try {
+        html = marked.parse(src, {
+          async: false,
+          gfm: true,
+          breaks: false,
+          headerIds: false,
+          mangle: false,
+        });
+      } catch (err) {
+        console.warn("marked.parse failed", err);
+        html = `<pre class="md-code">${escapeHtml(src)}</pre>`;
       }
-      const p = el("p");
-      // 连续非空行合并为一段时，用 <br> 保留模型输出的换行，避免网页端「一坨长段」
-      const html = paragraph
-        .map((line) => parseInline(line))
-        .join("<br>\n");
-      p.innerHTML = html;
-      root.append(p);
-      paragraph = [];
+    } else {
+      html = `<pre class="md-code">${escapeHtml(src)}</pre>`;
     }
-
-    function flushList() {
-      if (!listItems.length) {
-        return;
-      }
-      const ul = el("ul", "md-list");
-      for (const item of listItems) {
-        const li = el("li");
-        li.innerHTML = parseInline(item);
-        ul.append(li);
-      }
-      root.append(ul);
-      listItems = [];
+    if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
+      html = DOMPurify.sanitize(html, {
+        USE_PROFILES: { html: true },
+        ADD_ATTR: ["target", "rel"],
+      });
     }
-
-    function flushCode() {
-      if (!codeLines.length) {
-        return;
-      }
-      const pre = el("pre", "md-code");
-      pre.textContent = codeLines.join("\n");
-      root.append(pre);
-      codeLines = [];
-    }
-
-    for (const line of lines) {
-      if (line.trim().startsWith("```")) {
-        if (inCode) {
-          flushCode();
-          inCode = false;
-        } else {
-          flushParagraph();
-          flushList();
-          inCode = true;
-        }
-        continue;
-      }
-
-      if (inCode) {
-        codeLines.push(line);
-        continue;
-      }
-
-      const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
-      if (headingMatch) {
-        flushParagraph();
-        flushList();
-        const level = Math.min(4, headingMatch[1].length);
-        const heading = el(`h${level}`);
-        heading.innerHTML = parseInline(headingMatch[2]);
-        root.append(heading);
-        continue;
-      }
-
-      const listMatch = line.match(/^\s*(?:[-*]|\d+\.)\s+(.*)$/);
-      if (listMatch) {
-        flushParagraph();
-        listItems.push(listMatch[1]);
-        continue;
-      }
-
-      if (!line.trim()) {
-        flushParagraph();
-        flushList();
-        continue;
-      }
-
-      paragraph.push(line.trim());
-    }
-
-    flushParagraph();
-    flushList();
-    flushCode();
+    root.innerHTML = html;
     container.append(root);
   }
 
@@ -3391,47 +3354,123 @@
     event.preventDefault();
     const title = `${refs.kbUploadTitle?.value || ""}`.trim();
     const textContent = `${refs.kbUploadText?.value || ""}`.trim();
-    const file = refs.kbUploadFile?.files?.[0] || null;
+    const files = Array.from(refs.kbUploadFile?.files || []);
 
-    if (!textContent && !file) {
+    if (!textContent && !files.length) {
       setKbStatus(refs.kbUploadStatus, "请输入文本或选择一个 .txt / .md 文件。", { isError: true });
       return;
     }
 
-    const formData = new FormData();
-    formData.append("title", title);
-    formData.append("text_content", textContent);
-    if (file) {
-      formData.append("file", file);
-    }
-
-    const uploadLabel = file ? file.name : title || "知识条目";
     setKbUploadLabelUploading(true);
-    setKbStatus(
-      refs.kbUploadStatus,
-      file ? `正在上传「${uploadLabel}」…` : "正在上传知识条目…",
-      { isPending: true },
-    );
     refs.kbUploadStatus?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     if (refs.kbUploadBtn) {
       refs.kbUploadBtn.disabled = true;
     }
-    try {
+
+    const postOne = async (body) => {
       const response = await fetch("/api/v1/knowledge/upload", {
         method: "POST",
-        body: formData,
+        body,
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      const payload = await response.json();
-      const doneTitle = payload.title || uploadLabel || "知识条目";
-      setKbStatus(
-        refs.kbUploadStatus,
-        `✓ 已上传「${doneTitle}」。条目已出现在下方「已上传文档」列表。`,
-        { isSuccess: true },
-      );
-      refs.kbUploadStatus?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return response.json();
+    };
+
+    try {
+      if (!files.length) {
+        setKbStatus(refs.kbUploadStatus, "正在上传知识条目…", { isPending: true });
+        const formData = new FormData();
+        formData.append("title", title);
+        formData.append("text_content", textContent);
+        const payload = await postOne(formData);
+        const doneTitle = payload.title || title || "知识条目";
+        setKbStatus(
+          refs.kbUploadStatus,
+          `✓ 已上传「${doneTitle}」。条目已出现在下方「已上传文档」列表。`,
+          { isSuccess: true },
+        );
+        refs.kbUploadForm?.reset();
+        await Promise.all([loadCasesData(), loadKnowledgeDocuments()]);
+        if (state.activePage === "kb") {
+          renderKbPage();
+          refs.kbDocsList?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+        return;
+      }
+
+      if (files.length === 1) {
+        const file = files[0];
+        const formData = new FormData();
+        formData.append("title", title);
+        formData.append("text_content", textContent);
+        formData.append("file", file);
+        const uploadLabel = file.name;
+        setKbStatus(refs.kbUploadStatus, `正在上传「${uploadLabel}」…`, { isPending: true });
+        const payload = await postOne(formData);
+        const doneTitle = payload.title || uploadLabel || "知识条目";
+        setKbStatus(
+          refs.kbUploadStatus,
+          `✓ 已上传「${doneTitle}」。条目已出现在下方「已上传文档」列表。`,
+          { isSuccess: true },
+        );
+        refs.kbUploadForm?.reset();
+        await Promise.all([loadCasesData(), loadKnowledgeDocuments()]);
+        if (state.activePage === "kb") {
+          renderKbPage();
+          refs.kbDocsList?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+        return;
+      }
+
+      const hintEl = document.getElementById("kb-upload-file-hint");
+      const okTitles = [];
+      const failures = [];
+      const textNote = textContent ? " · 未使用纯文本框（请单独上传文字）" : "";
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        const stem = kbFileStem(file.name);
+        const docTitle = title ? `${title} · ${stem}` : stem || file.name;
+        if (hintEl) {
+          hintEl.textContent = `正在上传 ${i + 1}/${files.length}「${file.name}」…`;
+        }
+        setKbStatus(
+          refs.kbUploadStatus,
+          `正在上传 ${i + 1}/${files.length}「${file.name}」${textNote}`,
+          { isPending: true },
+        );
+        const formData = new FormData();
+        formData.append("title", docTitle);
+        formData.append("text_content", "");
+        formData.append("file", file);
+        try {
+          const payload = await postOne(formData);
+          okTitles.push(payload.title || docTitle);
+        } catch (err) {
+          failures.push({ name: file.name, message: safeErrorText(err) });
+        }
+      }
+
+      if (failures.length && !okTitles.length) {
+        setKbStatus(
+          refs.kbUploadStatus,
+          `全部失败：${failures.map((f) => `「${f.name}」${f.message}`).join("；")}`,
+          { isError: true },
+        );
+        return;
+      }
+
+      const okMsg =
+        okTitles.length === 1
+          ? `✓ 已上传「${okTitles[0]}」。`
+          : `✓ 已上传 ${okTitles.length} 个文件：${okTitles.slice(0, 3).join("、")}${okTitles.length > 3 ? "…" : ""}`;
+      const failMsg = failures.length
+        ? ` 有 ${failures.length} 个失败：${failures.map((f) => f.name).join("、")}。`
+        : "";
+      setKbStatus(refs.kbUploadStatus, `${okMsg}${failMsg}条目已更新至下方列表。`, {
+        isSuccess: !failures.length,
+      });
       refs.kbUploadForm?.reset();
       await Promise.all([loadCasesData(), loadKnowledgeDocuments()]);
       if (state.activePage === "kb") {
@@ -3463,7 +3502,7 @@
     event.preventDefault();
     const formData = new FormData(refs.form);
     const problemName = `${formData.get("problem_name") || ""}`.trim() || "番茄叶片图像诊断报告";
-    const caseText = "";
+    const caseText = `${formData.get("case_text") || ""}`.trim();
     const selectedImage = refs.imageInput?.files?.[0] || null;
     if (!selectedImage) {
       setStatus("请先上传番茄叶片图片", "error");

@@ -1986,12 +1986,16 @@ body.board-open {
 .markdown-body {
   display: grid;
   gap: 12px;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
-.markdown-body h4 {
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
   margin: 18px 0 6px;
   color: var(--text-1);
 }
@@ -2013,6 +2017,92 @@ body.board-open {
 .markdown-body p {
   margin: 0;
   word-break: break-word;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--text-2);
+  line-height: 1.75;
+  font-size: 15px;
+  max-width: 72ch;
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 12px 16px;
+  border-left: 4px solid rgba(111, 242, 165, 0.45);
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 0 10px 10px 0;
+  color: var(--text-2);
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  margin: 14px 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 4px 0 8px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+  color: var(--text-2);
+}
+
+.markdown-body table thead th {
+  background: rgba(111, 242, 165, 0.1);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.markdown-body table tbody tr:nth-child(even) td {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.markdown-body pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line);
+  color: #b4ffe0;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.markdown-body pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+}
+
+.markdown-body :not(pre) > code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(111, 242, 165, 0.12);
+  color: #b7ffe0;
+  font-size: 0.92em;
 }
 
 .md-list {
