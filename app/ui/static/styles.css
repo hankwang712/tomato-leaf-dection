@@ -605,6 +605,7 @@ textarea {
   border-radius: 14px;
   border: 1px solid rgba(111, 242, 165, 0.16);
   background: rgba(111, 242, 165, 0.06);
+  pointer-events: none;
 }
 
 .image-upload-feedback[hidden] {
