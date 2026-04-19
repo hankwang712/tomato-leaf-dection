@@ -284,10 +284,59 @@ select {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
   border-radius: var(--radius-xl);
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  transition: width 0.24s ease, min-width 0.24s ease, border-color 0.24s ease;
+}
+
+.input-panel-toggle {
+  position: absolute;
+  top: 24px;
+  right: 14px;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(7, 17, 14, 0.88);
+  color: var(--text-2);
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.input-panel-toggle:hover {
+  transform: translateX(1px);
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(111, 242, 165, 0.32);
+}
+
+.input-panel-toggle-icon {
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 0.24s ease;
+}
+
+.workspace.panel-collapsed .input-panel {
+  width: 56px;
+  min-width: 56px;
+}
+
+.workspace.panel-collapsed .input-panel > :not(.input-panel-toggle) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace.panel-collapsed .input-panel-toggle {
+  top: 18px;
+  right: 10px;
 }
 
 .panel-hero {
@@ -2529,6 +2578,20 @@ body.board-open {
 
   .input-panel {
     width: 100%;
+  }
+
+  .workspace.panel-collapsed .input-panel {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workspace.panel-collapsed .input-panel > :not(.input-panel-toggle) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .input-panel-toggle {
+    display: none;
   }
 
   .flow-canvas-shell {

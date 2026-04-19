@@ -58,7 +58,17 @@
         </header>
 
         <div class="workspace" id="workspace">
-          <aside class="input-panel glass">
+          <aside id="input-panel" class="input-panel glass">
+            <button
+              id="input-panel-toggle"
+              class="input-panel-toggle"
+              type="button"
+              aria-expanded="true"
+              aria-controls="input-panel"
+              title="收起左侧面板"
+            >
+              <span class="input-panel-toggle-icon" aria-hidden="true">&lt;</span>
+            </button>
             <div class="panel-hero">
               <div class="hero-pattern"></div>
               <div class="hero-content">

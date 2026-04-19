@@ -1,6 +1,8 @@
 (() => {
   const refs = {
     workspace: document.getElementById("workspace"),
+    inputPanel: document.getElementById("input-panel"),
+    inputPanelToggle: document.getElementById("input-panel-toggle"),
     form: document.getElementById("run-form"),
     imageInput: document.getElementById("image"),
     submitBtn: document.getElementById("submit-btn"),
@@ -72,6 +74,7 @@
   const FLOW_WORLD_PADDING = 360;
   const FLOW_VIEWPORT_PADDING = 120;
   const FLOW_VIEWPORT_OVERSCAN = 220;
+  const INPUT_PANEL_COLLAPSE_STORAGE_KEY = "diagnosis.inputPanelCollapsed";
 
   const AGENT_META = {
     human: {
@@ -239,6 +242,7 @@
 
   const state = {
     activePage: "diagnosis",
+    inputPanelCollapsed: false,
     currentView: "dialogue",
     reportMode: "multi",
     runId: "",
@@ -317,6 +321,49 @@
         selectEl.append(node);
       }
     }
+  }
+
+  function syncInputPanelUi() {
+    const collapsed = !!state.inputPanelCollapsed;
+    refs.workspace?.classList.toggle("panel-collapsed", collapsed);
+    refs.inputPanel?.classList.toggle("is-collapsed", collapsed);
+    if (refs.inputPanelToggle) {
+      refs.inputPanelToggle.setAttribute("aria-expanded", String(!collapsed));
+      refs.inputPanelToggle.setAttribute("title", collapsed ? "展开左侧面板" : "收起左侧面板");
+      const icon = refs.inputPanelToggle.querySelector(".input-panel-toggle-icon");
+      if (icon) {
+        icon.textContent = collapsed ? ">" : "<";
+      }
+    }
+  }
+
+  function applyInputPanelCollapsed(collapsed, { persist = true } = {}) {
+    state.inputPanelCollapsed = !!collapsed;
+    syncInputPanelUi();
+    if (persist) {
+      try {
+        window.localStorage.setItem(INPUT_PANEL_COLLAPSE_STORAGE_KEY, state.inputPanelCollapsed ? "1" : "0");
+      } catch (_err) {
+        // Ignore storage failures and keep the in-memory state only.
+      }
+    }
+    window.requestAnimationFrame(() => {
+      if (state.flowViewport.userAdjusted) {
+        applyFlowTransform();
+      } else {
+        fitFlowViewport();
+      }
+    });
+  }
+
+  function hydrateInputPanelState() {
+    let collapsed = false;
+    try {
+      collapsed = window.localStorage.getItem(INPUT_PANEL_COLLAPSE_STORAGE_KEY) === "1";
+    } catch (_err) {
+      collapsed = false;
+    }
+    applyInputPanelCollapsed(collapsed, { persist: false });
   }
 
   const boardRefs = {
@@ -3542,6 +3589,9 @@
 
   refs.reportViewBtn.addEventListener("click", () => setView("report"));
   refs.dialogueViewBtn.addEventListener("click", () => setView("dialogue"));
+  refs.inputPanelToggle?.addEventListener("click", () => {
+    applyInputPanelCollapsed(!state.inputPanelCollapsed);
+  });
 
   refs.clearKbBtn.addEventListener("click", () => void clearKnowledgeBase(refs.kbTarget.value, refs.kbStatus));
   refs.clearKbBtn2.addEventListener("click", () => void clearKnowledgeBase(refs.kbTarget2.value, refs.kbStatus2));
@@ -3574,6 +3624,7 @@
 
   initFlowViewport();
   ensureBoardView();
+  hydrateInputPanelState();
   hydrateHeroAgentIcons();
   setView(state.currentView);
   navigateTo("diagnosis");
