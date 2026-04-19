@@ -38,6 +38,8 @@ async def run_diagnosis(
             stage=stage.strip() or "initial",
             image_bytes=image_bytes,
             n_rounds=n_rounds,
+            image_filename=image.filename or "",
+            image_content_type=image.content_type or "",
         )
         return RunResponse(
             run_id=result["run_id"],
@@ -72,6 +74,8 @@ async def run_diagnosis_stream(
             stage=stage.strip() or "initial",
             image_bytes=image_bytes,
             n_rounds=n_rounds,
+            image_filename=image.filename or "",
+            image_content_type=image.content_type or "",
         ):
             yield json.dumps(event, ensure_ascii=False) + "\n"
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from hashlib import sha256
@@ -295,9 +297,17 @@ class DiagnosisPipeline:
         stage: str = "initial",
         image_bytes: bytes | None = None,
         n_rounds: int | None = None,
+        image_filename: str = "",
+        image_content_type: str = "",
     ) -> dict[str, Any]:
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         rounds_to_use = n_rounds or self.settings.n_rounds
+        image_meta = self._build_image_asset_meta(
+            run_id,
+            image_bytes,
+            image_filename=image_filename,
+            image_content_type=image_content_type,
+        )
 
         input_payload = {
             "run_id": run_id,
@@ -306,6 +316,7 @@ class DiagnosisPipeline:
             "stage": stage,
             "n_rounds": rounds_to_use,
             "timestamp": datetime.now().isoformat(),
+            "source_image": image_meta,
         }
 
         try:
@@ -355,8 +366,10 @@ class DiagnosisPipeline:
                 problem_name=problem_name,
                 case_text=case_text,
                 stage=stage,
+                n_rounds=rounds_to_use,
                 input_payload=input_payload,
                 image_bytes=image_bytes,
+                image_meta=image_meta,
                 caption=caption,
                 caption_data=caption_data,
                 image_analysis=image_analysis,
@@ -384,9 +397,17 @@ class DiagnosisPipeline:
         stage: str = "initial",
         image_bytes: bytes | None = None,
         n_rounds: int | None = None,
+        image_filename: str = "",
+        image_content_type: str = "",
     ) -> Iterator[dict[str, Any]]:
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         rounds_to_use = n_rounds or self.settings.n_rounds
+        image_meta = self._build_image_asset_meta(
+            run_id,
+            image_bytes,
+            image_filename=image_filename,
+            image_content_type=image_content_type,
+        )
 
         input_payload = {
             "run_id": run_id,
@@ -395,6 +416,7 @@ class DiagnosisPipeline:
             "stage": stage,
             "n_rounds": rounds_to_use,
             "timestamp": datetime.now().isoformat(),
+            "source_image": image_meta,
         }
         yield {
             "type": "run_started",
@@ -504,8 +526,10 @@ class DiagnosisPipeline:
                 problem_name=problem_name,
                 case_text=case_text,
                 stage=stage,
+                n_rounds=rounds_to_use,
                 input_payload=input_payload,
                 image_bytes=image_bytes,
+                image_meta=image_meta,
                 caption=caption,
                 caption_data=caption_data,
                 image_analysis=image_analysis,
@@ -577,6 +601,9 @@ class DiagnosisPipeline:
     def load_trace(self, run_id: str) -> dict[str, Any]:
         return self.run_store.load_json(run_id, "trace.json")
 
+    def get_run_image_path(self, run_id: str, filename: str) -> Path:
+        return self.run_store.load_file_path(run_id, filename)
+
     def clear_knowledge_base(self, target: str = "all") -> dict[str, Any]:
         return self.kb.clear_cases(target=target)
 
@@ -605,6 +632,33 @@ class DiagnosisPipeline:
             "display": display,
             "caption": caption_data,
             "vision_result": vision_result,
+        }
+
+    def _build_image_asset_meta(
+        self,
+        run_id: str,
+        image_bytes: bytes | None,
+        *,
+        image_filename: str = "",
+        image_content_type: str = "",
+    ) -> dict[str, Any]:
+        if not image_bytes:
+            return {}
+        original_name = Path(image_filename or "").name.strip()
+        suffix = Path(original_name).suffix.lower()
+        if not suffix and image_content_type:
+            suffix = mimetypes.guess_extension(image_content_type.split(";")[0].strip()) or ""
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}:
+            suffix = ".png"
+        base_name = Path(original_name).stem.strip() or "uploaded-image"
+        safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._-") or "uploaded-image"
+        stored_filename = f"source_image{suffix}"
+        return {
+            "original_filename": f"{safe_base}{suffix}",
+            "stored_filename": stored_filename,
+            "content_type": image_content_type.split(";")[0].strip() or self.run_store.guess_media_type(stored_filename),
+            "size_bytes": len(image_bytes),
+            "url": f"/api/v1/runs/{run_id}/image/{stored_filename}",
         }
 
     def _build_qwen_caption_provider(self, settings: Settings) -> LocalQwen3VLCaptionProvider | None:
@@ -694,8 +748,10 @@ class DiagnosisPipeline:
         problem_name: str,
         case_text: str,
         stage: str,
+        n_rounds: int,
         input_payload: dict[str, Any],
         image_bytes: bytes | None,
+        image_meta: dict[str, Any],
         caption: CaptionSchema,
         caption_data: dict[str, Any],
         image_analysis: dict[str, Any] | None,
@@ -818,6 +874,8 @@ class DiagnosisPipeline:
             "problem_name": problem_name,
             "case_text": case_text,
             "stage": stage,
+            "n_rounds": n_rounds,
+            "source_image": image_meta,
             **clean_trace["final"],
             "reports_ref": "reports.json",
             "reports": reports_payload,
@@ -846,6 +904,8 @@ class DiagnosisPipeline:
         if vision_result is not None:
             final_payload["vision_result"] = vision_result
 
+        if image_bytes and image_meta.get("stored_filename"):
+            self.run_store.save_bytes(run_id, image_meta["stored_filename"], image_bytes)
         self.run_store.save_json(run_id, "input.json", input_payload)
         self.run_store.save_json(run_id, "caption.json", caption_data)
         self.run_store.save_json(run_id, "trace.json", clean_trace)

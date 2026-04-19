@@ -4,6 +4,10 @@
     inputPanel: document.getElementById("input-panel"),
     inputPanelToggle: document.getElementById("input-panel-toggle"),
     form: document.getElementById("run-form"),
+    problemNameInput: document.getElementById("problem_name"),
+    stageInput: document.getElementById("stage"),
+    roundsInput: document.getElementById("n_rounds"),
+    caseTextInput: document.getElementById("case_text"),
     imageInput: document.getElementById("image"),
     submitBtn: document.getElementById("submit-btn"),
     status: document.getElementById("status"),
@@ -577,6 +581,62 @@
       ui.preview.src = imageUploadPreviewUrl;
     }
     ui.feedback.hidden = false;
+  }
+
+  function showSavedImageUploadFeedback(sourceImage) {
+    if (!sourceImage || !sourceImage.url) {
+      clearImageUploadFeedback();
+      return;
+    }
+    const ui = ensureImageUploadFeedback();
+    if (!ui) {
+      return;
+    }
+    if (imageUploadPreviewUrl) {
+      URL.revokeObjectURL(imageUploadPreviewUrl);
+      imageUploadPreviewUrl = "";
+    }
+    if (ui.name) {
+      ui.name.textContent = sourceImage.original_filename || "历史运行图片";
+    }
+    if (ui.size) {
+      const bits = [];
+      if (sourceImage.size_bytes) {
+        bits.push(formatBytes(sourceImage.size_bytes));
+      }
+      if (sourceImage.content_type) {
+        bits.push(sourceImage.content_type);
+      }
+      ui.size.textContent = bits.join(" · ");
+    }
+    if (ui.tip) {
+      ui.tip.textContent = "当前展示的是该运行记录提交时的原始图片；如需重新诊断，可重新选择新图片。";
+    }
+    if (ui.preview) {
+      ui.preview.src = sourceImage.url;
+      ui.preview.alt = sourceImage.original_filename || "历史运行图片";
+    }
+    ui.feedback.hidden = false;
+  }
+
+  function hydrateRunFormFromPayload(payload) {
+    const finalPayload = payload || {};
+    if (refs.problemNameInput) {
+      refs.problemNameInput.value = `${finalPayload.problem_name || "番茄叶片图像诊断报告"}`.trim();
+    }
+    if (refs.stageInput) {
+      refs.stageInput.value = finalPayload.stage || "initial";
+    }
+    if (refs.roundsInput) {
+      refs.roundsInput.value = `${finalPayload.n_rounds || 2}`;
+    }
+    if (refs.caseTextInput) {
+      refs.caseTextInput.value = finalPayload.case_text || "";
+    }
+    if (refs.imageInput) {
+      refs.imageInput.value = "";
+    }
+    showSavedImageUploadFeedback(finalPayload.source_image || {});
   }
 
   function createChip(label, active = false) {
@@ -1423,6 +1483,40 @@
     applyFlowTransform();
   }
 
+  function panFlowViewportBy(deltaX, deltaY) {
+    if (!refs.flowCanvasScroll) {
+      return;
+    }
+    state.flowViewport.offsetX += deltaX;
+    state.flowViewport.offsetY += deltaY;
+    state.flowViewport.userAdjusted = true;
+    applyFlowTransform();
+  }
+
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    if (target.closest("input, textarea, select, button, [contenteditable='true']")) {
+      return true;
+    }
+    const role = target.getAttribute("role");
+    return role === "textbox";
+  }
+
+  function shouldHandleFlowArrowNavigation(event) {
+    if (state.activePage !== "diagnosis" || state.currentView !== "dialogue") {
+      return false;
+    }
+    if (state.boardView.open) {
+      return false;
+    }
+    if (isEditableTarget(event.target)) {
+      return false;
+    }
+    return ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key);
+  }
+
   function initFlowViewport() {
     if (!refs.flowCanvasScroll) {
       return;
@@ -1746,6 +1840,17 @@
           || "当前报告将优先展示结论、证据边界和后续复核建议。"
       )
     );
+    if (finalPayload.source_image?.url) {
+      const imageWrap = el("div", "report-hero-image-wrap");
+      imageWrap.append(el("div", "report-hero-image-label", "诊断叶片原图"));
+      const image = document.createElement("img");
+      image.className = "report-hero-image";
+      image.src = finalPayload.source_image.url;
+      image.alt = finalPayload.source_image.original_filename || finalPayload.top_diagnosis?.name || "诊断叶片原图";
+      image.loading = "lazy";
+      imageWrap.append(image);
+      lead.append(imageWrap);
+    }
     hero.append(lead);
 
     const facts = el("div", "report-hero-facts");
@@ -3058,6 +3163,7 @@
       state.currentStage = state.finalResp.stage || "initial";
       state.isRunning = false;
       hydrateFlowFromSavedRun();
+      hydrateRunFormFromPayload(state.finalResp);
       navigateTo("diagnosis");
       renderCurrentRun();
       setStatus(`已加载 ${cleanId}`, "done");
@@ -3619,6 +3725,30 @@
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.boardView.open) {
       closeBoardView();
+    }
+    if (!shouldHandleFlowArrowNavigation(event)) {
+      return;
+    }
+    const step = event.shiftKey ? 180 : 90;
+    switch (event.key) {
+      case "ArrowLeft":
+        event.preventDefault();
+        panFlowViewportBy(step, 0);
+        break;
+      case "ArrowRight":
+        event.preventDefault();
+        panFlowViewportBy(-step, 0);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        panFlowViewportBy(0, step);
+        break;
+      case "ArrowDown":
+        event.preventDefault();
+        panFlowViewportBy(0, -step);
+        break;
+      default:
+        break;
     }
   });
 

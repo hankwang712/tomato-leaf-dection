@@ -640,6 +640,11 @@ textarea {
 .image-upload-tip {
   color: var(--text-3);
   font-size: 12px;
+  line-height: 1.5;
+}
+
+.image-upload-tip {
+  color: var(--text-2);
 }
 
 .file-icon {
@@ -1714,6 +1719,29 @@ button:disabled {
 
 .report-hero-lead {
   padding: 22px 24px;
+}
+
+.report-hero-image-wrap {
+  margin-top: 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.report-hero-image-label {
+  color: var(--text-3);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.report-hero-image {
+  width: min(100%, 320px);
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
 }
 
 .report-kicker {

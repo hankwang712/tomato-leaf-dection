@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from app.api.schemas_http import FinalResponse, TraceResponse
 from app.core.pipeline.diagnosis_pipeline import DiagnosisPipeline
@@ -36,6 +37,17 @@ def get_trace(run_id: str, request: Request) -> TraceResponse:
         return TraceResponse(run_id=run_id, trace=payload)
     except FileNotFoundError as err:
         raise HTTPException(status_code=404, detail=f"未找到运行记录: {run_id}") from err
+
+
+@router.get("/{run_id}/image/{filename}")
+def get_run_image(run_id: str, filename: str, request: Request) -> FileResponse:
+    pipeline = get_pipeline(request)
+    try:
+        image_path = pipeline.get_run_image_path(run_id, filename)
+        media_type = pipeline.run_store.guess_media_type(image_path.name)
+        return FileResponse(path=image_path, media_type=media_type, filename=image_path.name)
+    except FileNotFoundError as err:
+        raise HTTPException(status_code=404, detail=f"未找到运行图片: {run_id}/{filename}") from err
 
 
 @router.delete("/{run_id}")

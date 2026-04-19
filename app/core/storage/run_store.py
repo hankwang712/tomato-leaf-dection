@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import datetime
+from mimetypes import guess_type
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -24,6 +25,13 @@ class RunStore:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         return target_file
 
+    def save_bytes(self, run_id: str, filename: str, payload: bytes) -> Path:
+        target_dir = self.run_path(run_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / filename
+        target_file.write_bytes(payload)
+        return target_file
+
     def load_json(self, run_id: str, filename: str) -> dict[str, Any]:
         target_file = self.run_path(run_id) / filename
         if not target_file.exists():
@@ -36,6 +44,19 @@ class RunStore:
 
     def has_run(self, run_id: str) -> bool:
         return self.run_path(run_id).exists()
+
+    def load_file_path(self, run_id: str, filename: str) -> Path:
+        safe_name = Path(filename).name
+        if safe_name != filename:
+            raise FileNotFoundError(filename)
+        target_file = self.run_path(run_id) / safe_name
+        if not target_file.exists():
+            raise FileNotFoundError(str(target_file))
+        return target_file
+
+    def guess_media_type(self, filename: str) -> str:
+        media_type, _ = guess_type(filename)
+        return media_type or "application/octet-stream"
 
     def delete_run(self, run_id: str) -> bool:
         target = self.run_path(run_id)
