@@ -1547,7 +1547,10 @@ class MultiAgentOrchestrator:
         # 基本信息章节为表格形式，不需要特殊文本净化
         text = str(repaired.get("section_markdown", "")).strip()
         if len(text) < 80:
-            return self._build_emergency_section_payload(title=title, report_packet=report_packet)
+            return self._build_deterministic_section_payload(
+                report_packet=report_packet,
+                section_title=title,
+            )
         return repaired
 
     def _ensure_report_section_quality(
@@ -1576,6 +1579,25 @@ class MultiAgentOrchestrator:
             return payload, False
         except ValueError as err:
             issues = [str(err)]
+
+        deterministic_payload = self._build_deterministic_section_payload(
+            report_packet=report_packet,
+            section_title=title,
+        )
+        try:
+            deterministic_markdown = self._compose_section_markdown(
+                title=title,
+                payload=deterministic_payload,
+            )
+            validate_report_section(
+                title,
+                deterministic_markdown,
+                report_packet=report_packet,
+                previous_sections=completed_sections,
+            )
+            return deterministic_payload, True
+        except ValueError as err:
+            issues.append(str(err))
 
         repaired_payload = self._repair_section_payload(
             title=title,
@@ -2054,6 +2076,112 @@ class MultiAgentOrchestrator:
 
         primary = diagnosis_name
         secondary = self._first_non_empty(report_context.get("secondary_differential"), fallback="")
+
+        info_title, symptom_title, diff_title, treat_title, prognosis_title, notes_title = REQUIRED_REPORT_SECTIONS
+        symptom_bullets = self._unique_strings(
+            [
+                visual_summary or "叶片可见明确受害表现",
+                observed_symptoms,
+                area_ratio_source_note,
+                consistency_note,
+                symptom_summary,
+                image_specific_morphology,
+                "病斑颜色、边界、质地和分布仍需结合原图继续核对",
+                "当前章节仅描述图像可见现象，不直接下病原学结论",
+            ]
+        )[:8]
+        action_bullets = self._unique_strings(
+            list(action_plan.get("actions", []) or [])
+            + list(action_plan.get("low_risk_actions", []) or [])
+            + [
+                "优先执行低风险、可逆的田间管理措施",
+                "先控制湿度、通风和病残体，再决定是否升级处理",
+            ]
+        )[:5]
+        followup_bullets = self._unique_strings(
+            list(action_plan.get("monitoring_plan", []) or [])
+            + list(diagnosis_basis.get("evidence_to_collect", []) or [])
+            + [
+                "24 至 48 小时内复拍同叶位，观察病斑是否继续外扩",
+                "同步检查同株上部新叶、叶柄和邻近植株是否出现同类病斑",
+            ]
+        )[:5]
+        treatment_table = (
+            "| 防治类别 | 操作原则 | 执行条件与限制 |\n"
+            "| :--- | :--- | :--- |\n"
+            f"| 药剂选择 | 优先按首位疑似病害选择已登记类别 | {model_score_note or '分类倾向仅用于缩小范围，不等同于确诊'} |\n"
+            f"| 浓度与配比 | 严格参照标签或当地植保建议 | {prohibited_actions or '证据不足时不自行放大剂量或混配'} |\n"
+            f"| 施药间隔 | 依据复查结果与标签要求执行 | {required_followups or '需结合 24 至 48 小时复拍结果调整'} |\n"
+            "| 施药时机 | 选择通风、叶面较干时段 | 避免高湿、结露或即将降雨时施药 |"
+        )
+        prognosis_rows = [
+            ("可治愈性", safety_notes or "当前治疗目标以阻断扩展和保护健康组织为主"),
+            ("已受损部位恢复情况", prognosis_note or "已坏死组织通常不可逆，重点在于避免继续扩大"),
+            ("周边风险", required_followups or "需复查同株与邻株是否出现同类病斑"),
+            ("产量影响", review_summary or "实际影响取决于扩展速度、整株受累范围和后续控制效果"),
+        ]
+        sections = [
+            (
+                info_title,
+                (
+                    "| 作物 | 诊断病害（首位疑似） | 病原或类别 | 图像分类相似度/模型倾向 | 田间确诊把握 | 病害阶段 | 受害部位 | 生育期与地点 |\n"
+                    "|---|---|---|---|---|---|---|---|\n"
+                    f"| {crop} | {primary} | 待复核 | {model_score_note or confidence_statement} | {confidence_label} | {stage_hint or '待复核'} | 叶片 | 未知 |\n\n"
+                    f"{diagnosis_statement} {evidence_sufficiency}"
+                ),
+            ),
+            (
+                symptom_title,
+                "\n".join(f"- {item}" for item in symptom_bullets if item),
+            ),
+            (
+                diff_title,
+                (
+                    f"{confidence_statement}\n\n"
+                    "| 病害 | 可能性 | 依据 |\n"
+                    "|---|---|---|\n"
+                    f"| {primary} | {confidence_label} | {primary_reasoning or visual_evidence or '当前图像特征与模型倾向一致'} |\n"
+                    f"{f'| {secondary} | 较低 | {differential_points or counter_evidence or '仍需补充关键区分证据'} |' if secondary else ''}\n"
+                    f"| 其他相似叶部病害 | 较低 | {counter_evidence or '现阶段缺乏足以支持更高排序的特异性证据'} |\n\n"
+                    f"若补充到 {evidence_to_collect or uncertainty_discriminators or '叶背、整株和时序证据'}，则候选排序可能调整。"
+                ),
+            ),
+            (
+                treat_title,
+                (
+                    "### 立即核查\n"
+                    f"- {evidence_to_collect or '补拍叶背、整株和连续复拍图像'}\n"
+                    f"- {reason_summary or '核对病斑边界、扩展速度和是否出现新发病斑'}\n"
+                    + "".join(f"- {item}\n" for item in followup_bullets if item)
+                    + "\n### 药剂防治\n"
+                    + treatment_table
+                    + "\n\n### 农业防治\n"
+                    + "".join(f"- {item}\n" for item in action_bullets if item)
+                    + (f"- {timeline_summary}\n" if timeline_summary else "")
+                    + (f"- 升级条件：{escalation_conditions}\n" if escalation_conditions else "")
+                ),
+            ),
+            (
+                prognosis_title,
+                (
+                    "| 评估指标 | 现状描述与风险研判 |\n"
+                    "| :--- | :--- |\n"
+                    + "\n".join(f"| {label} | {value} |" for label, value in prognosis_rows if value)
+                ),
+            ),
+            (
+                notes_title,
+                (
+                    f"> 当前诊断主要基于图像与上下文信息，{evidence_sufficiency}。\n\n"
+                    f"> 优先补证方向：{evidence_to_collect or uncertainty_discriminators or '补充叶背、整株和时序证据'}。\n\n"
+                    f"> 若出现 {escalation_conditions or upgrade_thresholds or '快速扩展、出现新发病斑或整株受累'}，应及时升级处理并线下复核。"
+                ),
+            ),
+        ]
+        blocks = ["# 番茄叶片病害诊断报告"]
+        for title, body in sections:
+            blocks.append(f"## {title}\n{self._polish_report_text(body)}")
+        return "\n\n".join(blocks).strip()
 
         sections = [
             (
